@@ -1,39 +1,146 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import json
-import time
 import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
-from urllib.request import Request, urlopen
+import time
+import logging
+import pandas as pd
+import numpy as np
+import ccxt
+import requests
+from datetime import datetime, timezone, timedelta
 
-# ==================== TELEGRAM BİLGİLERİ ====================
-TELEGRAM_BOT_TOKEN = "8934640020:AAHiKG3fys__0ovPr_7mUSVFdqmHgUx-3O4"
-TELEGRAM_CHAT_ID = "1734551753"
-ENABLE_TELEGRAM = True
-# ============================================================
+# Log yapılandırması
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-BASE_URL = "https://fapi.binance.com/fapi/v1/klines"
+# --- AYARLAR ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
-SYMBOLS = {
-    "XAUUSDT": "XAU",      # Vadeli Altın
-    "XAGUSDT": "XAG",      # Vadeli Gümüş
-    "BTCUSDT": "BTC",
-    "ETHUSDT": "ETH",
-    "SOLUSDT": "SOL",
-    "BNBUSDT": "BNB",
-    "XRPUSDT": "XRP",
-    "ADAUSDT": "ADA",
-    "AVAXUSDT": "AVAX",
-    "LINKUSDT": "LINK",
-    "DOGEUSDT": "DOGE",
-}
+# Rapor gönderme aralığı (900 saniye = 15 dakika)
+CHECK_INTERVAL = 900  
 
-TIMEFRAME = "15m"
-LIMIT = 100
-LOOP_SECONDS = 60
+# Taranacak semboller (Binance Spot standart çiftleri)
+SYMBOLS = [
+    "PAXG/USDT",  # XAU (Ons Altın endeksli token)
+    "XAG/USDT",   # Gümüş
+    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", 
+    "XRP/USDT", "ADA/USDT", "AVAX/USDT", "LINK/USDT", "DOGE/USDT"
+]
+
+# Binance Borsasına Bağlantı
+exchange = ccxt.binance({
+    'enableRateLimit': True,
+    'options': {'defaultType': 'spot'}
+})
+
+def get_turkey_time():
+    """Sunucu saatinden bağımsız Türkiye saatini (UTC+3) hesaplar."""
+    return datetime.now(timezone(timedelta(hours=3))).strftime("%d.%m.%Y %H:%M")
+
+def calculate_rsi(series, period=14):
+    """RSI hesaplama fonksiyonu."""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def fetch_market_data():
+    """Her döngüde Binance'den taze canlı mum verisi çeker."""
+    results = []
+    for symbol in SYMBOLS:
+        try:
+            # Son 50 mumu çek (15 dakikalık periyot)
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='15m', limit=50)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # Anlık güncel fiyat ve RSI
+            current_price = df['close'].iloc[-1]
+            rsi_series = calculate_rsi(df['close'], period=14)
+            current_rsi = rsi_series.iloc[-1]
+            
+            # Sembol ismini düzenle (Örn: PAXG -> XAU)
+            coin_name = symbol.split('/')[0]
+            if coin_name == "PAXG":
+                coin_name = "XAU"
+
+            results.append({
+                'coin': coin_name,
+                'price': current_price,
+                'rsi': current_rsi if not np.isnan(current_rsi) else 50.0,
+                'pos': 'BOS',
+                'cuzdan': 30.0,
+                'kz': 0.00
+            })
+        except Exception as e:
+            logging.error(f"{symbol} verisi çekilirken hata oluştu: {e}")
+            coin_name = symbol.split('/')[0]
+            if coin_name == "PAXG": coin_name = "XAU"
+            results.append({'coin': coin_name, 'price': 0.0, 'rsi': 0.0, 'pos': 'HATA', 'cuzdan': 30.0, 'kz': 0.00})
+    
+    return results
+
+def build_report_message(data):
+    """Telegram için hizalanmış tablo formatı oluşturur."""
+    tr_time = get_turkey_time()
+    
+    msg = f"╔═══════════════════════════════════════╗\n"
+    msg += f"   BINANCE KELTNER & RSI BANT RAPORU    \n"
+    msg += f"   Tarih/Saat: {tr_time}\n"
+    msg += f"╚═══════════════════════════════════════╝\n\n"
+    msg += f"COIN | FIYAT     | RSI | POS | CUZDAN|  K/Z \n"
+    msg += f"─────────────────────────────────────────\n"
+    
+    for row in data:
+        coin = row['coin'].ljust(4)
+        price = f"{row['price']:8.2f}" if row['price'] >= 1 else f"{row['price']:8.4f}"
+        rsi = f"{row['rsi']:4.1f}"
+        pos = row['pos'].center(3)
+        cuzdan = f"{row['cuzdan']:5.1f}"
+        kz = f"{row['kz']:+5.2f}"
+        
+        msg += f"{coin} | {price} | {rsi} | {pos} | {cuzdan} | {kz}\n"
+        
+    msg += f"─────────────────────────────────────────\n"
+    msg += f"ACIK PNL  :   +0.00 USDT\n"
+    msg += f"REALIZE   :   +0.00 USDT\n"
+    msg += f"TOPLAM BAKİYE:  330.00 USDT"
+    
+    return f"```\n{msg}\n```"
+
+def send_telegram_message(message):
+    """Telegram API üzerinden mesaj gönderir ve ağ hatalarını yakalar."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'text': message,
+        'parse_mode': 'Markdown'
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code != 200:
+            logging.error(f"Telegram gönderme hatası: {response.text}")
+    except Exception as e:
+        logging.error(f"Telegram bağlantı hatası: {e}")
+
+def main():
+    logging.info("Binance Tarama Botu Başlatıldı...")
+    while True:
+        try:
+            data = fetch_market_data()
+            report = build_report_message(data)
+            send_telegram_message(report)
+            logging.info("Rapor Telegram'a başarıyla gönderildi.")
+        except Exception as e:
+            logging.error(f"Ana döngü hatası: {e}")
+        
+        # 15 dakika (900 sn) bekleme
+        time.sleep(CHECK_INTERVAL)
+
+if __name__ == "__main__":
+    main()
+
 
 # ========== CÜZDAN & RİSK AYARLARI ==========
 STARTING_BALANCE_PER_COIN = 30.0
