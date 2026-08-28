@@ -4,10 +4,10 @@
 import json
 import time
 import os
-import subprocess
 import atexit
 from datetime import datetime, timezone, timedelta
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -27,8 +27,9 @@ BASE_URLS = [
     "https://fapi2.binance.com/fapi/v1/klines"
 ]
 
+# XAUUSDT yerine Binance Futures tarafında PAXGUSDT tercih edilmelidir
 SYMBOLS = {
-    "XAUUSDT": "XAU", "XAGUSDT": "XAG", "BTCUSDT": "BTC",
+    "PAXGUSDT": "XAU", "BTCUSDT": "BTC",
     "ETHUSDT": "ETH", "SOLUSDT": "SOL", "BNBUSDT": "BNB",
     "XRPUSDT": "XRP", "ADAUSDT": "ADA", "AVAXUSDT": "AVAX",
     "LINKUSDT": "LINK", "DOGEUSDT": "DOGE"
@@ -51,24 +52,6 @@ REQUEST_TIMEOUT = 10
 RETRY_COUNT = 3
 TELEGRAM_NOTIFY_INTERVAL = 15 * 60
 TURKEY_TZ = timezone(timedelta(hours=3))
-
-def acquire_wake_lock():
-    try:
-        subprocess.run(["termux-wake-lock"], check=False)
-    except Exception:
-        pass
-
-def release_wake_lock():
-    try:
-        subprocess.run(["termux-wake-unlock"], check=False)
-    except Exception:
-        pass
-
-acquire_wake_lock()
-atexit.register(release_wake_lock)
-
-def clear_screen():
-    os.system("cls" if os.name == "nt" else "clear")
 
 def now_date_text():
     return datetime.now(TURKEY_TZ).strftime("%d.%m.%Y %H:%M:%S")
@@ -96,16 +79,16 @@ def load_state():
     except Exception:
         return None
 
-def send_telegram_msg(message):
+def send_telegram_msg(message, parse_mode="HTML"):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[TELEGRAM] Token veya Chat ID bulunamadı!")
+        print("[TELEGRAM] Token veya Chat ID eksik! Render Environment Variables kontrol ediniz.")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = json.dumps({
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"<pre>{message}</pre>",
-        "parse_mode": "HTML"
+        "text": message,
+        "parse_mode": parse_mode
     }).encode("utf-8")
 
     headers = {
@@ -115,12 +98,16 @@ def send_telegram_msg(message):
 
     req = Request(url, data=payload, headers=headers, method="POST")
 
-    for _ in range(RETRY_COUNT):
+    for attempt in range(RETRY_COUNT):
         try:
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return response.status == 200
+        except HTTPError as e:
+            error_body = e.read().decode("utf-8")
+            print(f"[TELEGRAM API HATASI] Kod: {e.code} - Detay: {error_body}")
+            break
         except Exception as e:
-            print(f"[TELEGRAM HATA] {e}")
+            print(f"[TELEGRAM BAĞLANTI HATASI] {e}")
             time.sleep(1)
 
     return False
@@ -244,7 +231,7 @@ def main():
         trade_number = 0
 
     print("\n========================================\n       10X SANAL KELTNER BOT\n========================================")
-    send_telegram_msg(f"🚀 BOT BAŞLATILDI!\nTarih: {now_date_text()}\nSistem Render üzerinde aktifleştirildi.")
+    send_telegram_msg(f"🚀 <b>BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nSistem Render üzerinde aktifleştirildi.")
 
     last_telegram_time = 0
 
@@ -345,7 +332,6 @@ def main():
             lines.append(f"TOPLAM VARLIK  : {total_equity:8.2f} USDT")
 
             output_text = "\n".join(lines)
-            clear_screen()
             print(output_text)
 
             for event in trade_events:
@@ -353,7 +339,7 @@ def main():
 
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                send_telegram_msg(output_text)
+                send_telegram_msg(f"<pre>{output_text}</pre>")
                 last_telegram_time = now_ts
 
             save_state(positions, wallet_balances, realized_pnl, trade_number)
