@@ -15,8 +15,8 @@ import threading
 # ============================================================
 # TELEGRAM BİLGİLERİ (Render Environment Variables)
 # ============================================================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8680932537:AAFwFy1EjZvKnrxYei8tmb4FQQbXlQ8Fuo8")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
 # BINANCE API
