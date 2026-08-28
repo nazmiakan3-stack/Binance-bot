@@ -16,7 +16,7 @@ import threading
 # TELEGRAM (Render Environment Variable veya Varsayılan)
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "BURAYA_BOT_TOKENINI_YAZABILIRSIN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8680932537:AAEWtIILsVYRsCsJdIFwBzv87QzeSmPJvkI)
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1734551753")
 
 
