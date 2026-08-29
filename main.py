@@ -5,6 +5,7 @@ import json
 import time
 import os
 import atexit
+import random
 from datetime import datetime, timezone, timedelta
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -19,7 +20,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# BINANCE API & COINLER
+# BINANCE API
 # ============================================================
 BASE_URLS = [
     "https://fapi.binance.com/fapi/v1/klines",
@@ -34,17 +35,9 @@ SYMBOLS = {
     "LINKUSDT": "LINK", "DOGEUSDT": "DOGE"
 }
 
-# ============================================================
-# STRATEJİ & TRADE AYARLARI
-# ============================================================
 TIMEFRAME = "15m"
 LIMIT = 100
 LOOP_SECONDS = 60
-
-# Eger botun daha cok isleme girmesini istersen bu degerleri gevsetebilirsin:
-RSI_LONG_LEVEL = 25.0    # Test icin 35 yapilabilir
-RSI_SHORT_LEVEL = 75.0   # Test icin 65 yapilabilir
-KC_MULTIPLIER = 2.0      # Test icin 1.5 yapilabilir (Keltner Band genisligi)
 
 STARTING_BALANCE_PER_COIN = 30.0
 MARGIN_PER_TRADE = 25.0
@@ -197,31 +190,30 @@ def analyze(symbol):
     if not ema or atr == 0:
         return (symbol, None, None, None)
 
-    # Keltner Bandı ve RSI Hesaplaması (Dinamik Ayarlarla)
-    kc_lower = ema[-1] - (atr * KC_MULTIPLIER)
-    kc_upper = ema[-1] + (atr * KC_MULTIPLIER)
+    kc_lower = ema[-1] - atr * 2
+    kc_upper = ema[-1] + atr * 2
     rsi = calc_rsi(closes, 14)
 
     signal = None
-    if price < kc_lower and rsi <= RSI_LONG_LEVEL:
+    if price < kc_lower and rsi <= 25:
         signal = "LONG"
-    elif price > kc_upper and rsi >= RSI_SHORT_LEVEL:
+    elif price > kc_upper and rsi >= 75:
         signal = "SHORT"
 
     return (symbol, signal, price, rsi)
 
-# ============================================================
-# RENDER HEALTH CHECK
-# ============================================================
+# --- SUNUCU, ANA DÖNGÜ VE KENDİ KENDİNİ UYANDIRMA SİSTEMİ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot Active")
-
     def do_HEAD(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/html")
         self.end_headers()
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"<html><body><h1>Binance Bot Aktif ve Calisiyor!</h1></body></html>")
 
     def log_message(self, format, *args):
         return
@@ -231,11 +223,29 @@ def run_health_check_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# ============================================================
-# ANA DÖNGÜ
-# ============================================================
+def self_ping():
+    # DİKKAT: Buradaki URL'yi KESİNLİKLE kendi binance-bot Render URL'n ile değiştir!
+    url = "https://BURAYA_RENDER_LINKINI_YAZ.onrender.com"
+    while True:
+        # 10 ile 12 dakika (600 ile 720 saniye) arasında rastgele bir süre seç
+        bekleme_suresi = random.randint(600, 720) 
+        time.sleep(bekleme_suresi) 
+        
+        try:
+            req = Request(url, headers={"User-Agent": "BinanceBot-KeepAlive"})
+            with urlopen(req, timeout=10) as response:
+                dakika = bekleme_suresi // 60
+                saniye = bekleme_suresi % 60
+                print(f"[{now_date_text()}] 🔄 Self-Ping: {dakika} dk {saniye} sn sonra istek atildi. (Durum: {response.status})")
+        except Exception as e:
+            print(f"[{now_date_text()}] ⚠️ Self-Ping hatasi: {e}")
+
 def main():
+    # 1. Web sunucusunu arka planda başlat
     threading.Thread(target=run_health_check_server, daemon=True).start()
+    
+    # 2. Kendi kendini uyandırma (Self-Ping) sistemini arka planda başlat
+    threading.Thread(target=self_ping, daemon=True).start()
 
     state = load_state()
     if state:
@@ -260,14 +270,14 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
+            # Mobil Uyumlu Liste Tasarımı
             lines = []
             lines.append("🎯 <b>10X SANAL KELTNER RAPORU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
             lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n")
             lines.append("<b>🪙 COIN DURUMLARI</b>")
 
-            # max_workers=2 yapılarak Rate Limit ihtimali çok düşürüldü
-            with ThreadPoolExecutor(max_workers=2) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
@@ -338,6 +348,7 @@ def main():
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 
+                # Emojilerle durum gösterimi
                 if status_code == "BOŞ": status_emoji = "⚪️ BOŞ"
                 elif status_code == "LONG": status_emoji = "🟢 LONG"
                 elif status_code == "SHORT": status_emoji = "🔴 SHORT"
@@ -358,6 +369,7 @@ def main():
 
             output_text = "\n".join(lines)
             
+            # Konsol loglarında HTML taglarını silerek temiz bir görünüm veriyoruz
             print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
 
             for event in trade_events:
