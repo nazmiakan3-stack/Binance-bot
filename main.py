@@ -100,21 +100,27 @@ def send_telegram_msg(message, parse_mode="HTML"):
         try:
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return response.status == 200
-        except HTTPError as e:
+        except HTTPError:
             time.sleep(1)
-        except Exception as e:
+        except Exception:
             time.sleep(1)
 
     return False
 
-def http_get_json(url):
+# İlk açılıştaki N/A sorununu çözmek için API isteklerine "Retry" (Tekrar deneme) eklendi
+def http_get_json(url, retries=2):
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    try:
-        req = Request(url, headers=headers)
-        with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return None
+    for attempt in range(retries):
+        try:
+            req = Request(url, headers=headers)
+            with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(1) # Başarısız olursa 1 saniye bekleyip tekrar dener
+            else:
+                return None
+    return None
 
 def get_klines(symbol):
     for base_url in BASE_URLS:
@@ -225,8 +231,15 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("\n========================================\n       10X SANAL KELTNER BOT\n========================================")
+    print("\n========================================")
+    print("         10X SANAL KELTNER BOT          ")
+    print("========================================")
+    
     send_telegram_msg(f"🚀 <b>BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nSistem Render üzerinde aktifleştirildi.")
+
+    # Render ağının tam stabil hale gelmesi için ilk istekler öncesi kısa bekleme (N/A çözümü)
+    print("Ağ bağlantıları ısıtılıyor, lütfen bekleyin...")
+    time.sleep(3) 
 
     last_telegram_time = 0
 
@@ -236,13 +249,15 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
 
-            lines.append("╔" + "═" * 40 + "╗")
-            lines.append(f"║{'10X SANAL KELTNER RAPORU':^40}║")
-            lines.append(f"║{f'Tarih: {now_date_text()}':^40}║")
-            lines.append(f"║{f'Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.0f} USDT':^40}║")
-            lines.append("╚" + "═" * 40 + "╝")
-            lines.append(f"{'COIN':<4} | {'FİYAT':^9} | {'DURUM':<5} | {'CÜZDAN':^6} | {'K/Z':^6}")
-            lines.append("─" * 42)
+            # Kutu çizimi hatalarını önlemek için standart ASCII formatı kullanıldı (Görüntü bozulması çözümü)
+            lines.append("==========================================")
+            lines.append("         10X SANAL KELTNER RAPORU         ")
+            lines.append("==========================================")
+            lines.append(f"Tarih   : {now_date_text()}")
+            lines.append(f"Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.0f} USDT")
+            lines.append("------------------------------------------")
+            lines.append("COIN |   FİYAT   | DURUM | CÜZDAN |  K/Z  ")
+            lines.append("------------------------------------------")
 
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
@@ -313,18 +328,23 @@ def main():
                         status_code = "LNG  " if side == "LONG" else "SHR  "
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
-                price_str = f"{current_price:>9.1f}" if current_price >= 1000 else (f"{current_price:>9.2f}" if current_price >= 1 else f"{current_price:>9.6f}")
+                
+                # Fiyat formatı 9 karaktere sabitlendi
+                if current_price >= 1000:
+                    price_str = f"{current_price:>9.1f}"
+                elif current_price >= 1:
+                    price_str = f"{current_price:>9.2f}"
+                else:
+                    price_str = f"{current_price:>9.6f}"
 
                 lines.append(f"{name:<4} | {price_str} | {status_code:<5} | {display_wallet:>6.2f} | {unrealized_pnl:>+6.2f}")
 
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
             total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
-
-            # Toplam varlığa göre Açık K/Z Yüzde Oranı Hesabı
             pnl_pct = (total_unrealized_pnl / total_equity * 100) if total_equity > 0 else 0.0
 
-            lines.append("─" * 42)
+            lines.append("------------------------------------------")
             lines.append(f"AÇIK K/Z      : {total_unrealized_pnl:>+7.2f} USDT (%{pnl_pct:>+5.2f})")
             lines.append(f"REALİZE K/Z   : {total_realized:>+7.2f} USDT")
             lines.append(f"TOPLAM VARLIK : {total_equity:>7.2f} USDT")
@@ -353,3 +373,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
