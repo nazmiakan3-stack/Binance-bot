@@ -107,7 +107,6 @@ def send_telegram_msg(message, parse_mode="HTML"):
 
     return False
 
-# İlk açılıştaki N/A sorununu çözmek için API isteklerine "Retry" (Tekrar deneme) eklendi
 def http_get_json(url, retries=2):
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     for attempt in range(retries):
@@ -115,9 +114,9 @@ def http_get_json(url, retries=2):
             req = Request(url, headers=headers)
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return json.loads(response.read().decode("utf-8"))
-        except Exception as e:
+        except Exception:
             if attempt < retries - 1:
-                time.sleep(1) # Başarısız olursa 1 saniye bekleyip tekrar dener
+                time.sleep(1) 
             else:
                 return None
     return None
@@ -231,33 +230,23 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("\n========================================")
-    print("         10X SANAL KELTNER BOT          ")
-    print("========================================")
-    
+    print("Sistem başlatılıyor...")
     send_telegram_msg(f"🚀 <b>BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nSistem Render üzerinde aktifleştirildi.")
-
-    # Render ağının tam stabil hale gelmesi için ilk istekler öncesi kısa bekleme (N/A çözümü)
-    print("Ağ bağlantıları ısıtılıyor, lütfen bekleyin...")
     time.sleep(3) 
 
     last_telegram_time = 0
 
     while True:
         try:
-            lines = []
             trade_events = []
             total_unrealized_pnl = 0.0
-
-            # Kutu çizimi hatalarını önlemek için standart ASCII formatı kullanıldı (Görüntü bozulması çözümü)
-            lines.append("==========================================")
-            lines.append("         10X SANAL KELTNER RAPORU         ")
-            lines.append("==========================================")
-            lines.append(f"Tarih   : {now_date_text()}")
-            lines.append(f"Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.0f} USDT")
-            lines.append("------------------------------------------")
-            lines.append("COIN |   FİYAT   | DURUM | CÜZDAN |  K/Z  ")
-            lines.append("------------------------------------------")
+            
+            # Mobil Uyumlu Liste Tasarımı
+            lines = []
+            lines.append("🎯 <b>10X SANAL KELTNER RAPORU</b>")
+            lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
+            lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n")
+            lines.append("<b>🪙 COIN DURUMLARI</b>")
 
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
@@ -269,12 +258,13 @@ def main():
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
-                    lines.append(f"{name:<4} | {'N/A':>9} | BOŞ   | {wallet:>6.2f} |  +0.00")
+                    lines.append(f"🔸 <b>{name}:</b> N/A")
+                    lines.append(f"└ ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
                     continue
 
                 pos = positions.get(symbol)
                 unrealized_pnl = 0.0
-                status_code = "BOŞ  "
+                status_code = "BOŞ"
 
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
@@ -315,7 +305,7 @@ def main():
                         wallet_balances[symbol] += MARGIN_PER_TRADE + unrealized_pnl
                         realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + unrealized_pnl
                         positions[symbol] = None
-                        status_code = "KAP  "
+                        status_code = "KAPALI"
                         res_text = "TAKE PROFIT" if hit_tp else "STOP LOSS"
 
                         trade_events.append(
@@ -325,39 +315,40 @@ def main():
                             f"Yeni Cüzdan: {wallet_balances[symbol]:.2f} USDT"
                         )
                     else:
-                        status_code = "LNG  " if side == "LONG" else "SHR  "
+                        status_code = "LONG" if side == "LONG" else "SHORT"
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 
-                # Fiyat formatı 9 karaktere sabitlendi
-                if current_price >= 1000:
-                    price_str = f"{current_price:>9.1f}"
-                elif current_price >= 1:
-                    price_str = f"{current_price:>9.2f}"
-                else:
-                    price_str = f"{current_price:>9.6f}"
-
-                lines.append(f"{name:<4} | {price_str} | {status_code:<5} | {display_wallet:>6.2f} | {unrealized_pnl:>+6.2f}")
+                # Emojilerle durum gösterimi
+                if status_code == "BOŞ": status_emoji = "⚪️ BOŞ"
+                elif status_code == "LONG": status_emoji = "🟢 LONG"
+                elif status_code == "SHORT": status_emoji = "🔴 SHORT"
+                elif status_code == "KAPALI": status_emoji = "✅ KAP"
+                
+                lines.append(f"🔸 <b>{name}:</b> {current_price}")
+                lines.append(f"└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
 
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
             total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
             pnl_pct = (total_unrealized_pnl / total_equity * 100) if total_equity > 0 else 0.0
 
-            lines.append("------------------------------------------")
-            lines.append(f"AÇIK K/Z      : {total_unrealized_pnl:>+7.2f} USDT (%{pnl_pct:>+5.2f})")
-            lines.append(f"REALİZE K/Z   : {total_realized:>+7.2f} USDT")
-            lines.append(f"TOPLAM VARLIK : {total_equity:>7.2f} USDT")
+            lines.append("\n<b>📊 GENEL ÖZET</b>")
+            lines.append(f"💵 <b>Toplam Varlık:</b> {total_equity:.2f} USDT")
+            lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (<b>%{pnl_pct:+.2f}</b>)")
+            lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:+.2f} USDT")
 
             output_text = "\n".join(lines)
-            print(output_text)
+            
+            # Konsol loglarında HTML taglarını silerek temiz bir görünüm veriyoruz
+            print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
 
             for event in trade_events:
                 send_telegram_msg(event)
 
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                send_telegram_msg(f"<pre>\n{output_text}\n</pre>")
+                send_telegram_msg(output_text) # <pre> tag'i kaldırıldı, doğrudan mobil uyumlu HTML gönderiliyor.
                 last_telegram_time = now_ts
 
             save_state(positions, wallet_balances, realized_pnl, trade_number)
@@ -373,4 +364,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
