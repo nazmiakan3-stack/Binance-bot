@@ -19,7 +19,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# BINANCE API
+# BINANCE API & COINLER
 # ============================================================
 BASE_URLS = [
     "https://fapi.binance.com/fapi/v1/klines",
@@ -34,9 +34,17 @@ SYMBOLS = {
     "LINKUSDT": "LINK", "DOGEUSDT": "DOGE"
 }
 
+# ============================================================
+# STRATEJİ & TRADE AYARLARI
+# ============================================================
 TIMEFRAME = "15m"
 LIMIT = 100
 LOOP_SECONDS = 60
+
+# Eger botun daha cok isleme girmesini istersen bu degerleri gevsetebilirsin:
+RSI_LONG_LEVEL = 25.0    # Test icin 35 yapilabilir
+RSI_SHORT_LEVEL = 75.0   # Test icin 65 yapilabilir
+KC_MULTIPLIER = 2.0      # Test icin 1.5 yapilabilir (Keltner Band genisligi)
 
 STARTING_BALANCE_PER_COIN = 30.0
 MARGIN_PER_TRADE = 25.0
@@ -189,23 +197,31 @@ def analyze(symbol):
     if not ema or atr == 0:
         return (symbol, None, None, None)
 
-    kc_lower = ema[-1] - atr * 2
-    kc_upper = ema[-1] + atr * 2
+    # Keltner Bandı ve RSI Hesaplaması (Dinamik Ayarlarla)
+    kc_lower = ema[-1] - (atr * KC_MULTIPLIER)
+    kc_upper = ema[-1] + (atr * KC_MULTIPLIER)
     rsi = calc_rsi(closes, 14)
 
     signal = None
-    if price < kc_lower and rsi <= 25:
+    if price < kc_lower and rsi <= RSI_LONG_LEVEL:
         signal = "LONG"
-    elif price > kc_upper and rsi >= 75:
+    elif price > kc_upper and rsi >= RSI_SHORT_LEVEL:
         signal = "SHORT"
 
     return (symbol, signal, price, rsi)
 
+# ============================================================
+# RENDER HEALTH CHECK
+# ============================================================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot Active")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
     def log_message(self, format, *args):
         return
@@ -215,6 +231,9 @@ def run_health_check_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
+# ============================================================
+# ANA DÖNGÜ
+# ============================================================
 def main():
     threading.Thread(target=run_health_check_server, daemon=True).start()
 
@@ -241,14 +260,14 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
-            # Mobil Uyumlu Liste Tasarımı
             lines = []
             lines.append("🎯 <b>10X SANAL KELTNER RAPORU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
             lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n")
             lines.append("<b>🪙 COIN DURUMLARI</b>")
 
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            # max_workers=2 yapılarak Rate Limit ihtimali çok düşürüldü
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
@@ -319,7 +338,6 @@ def main():
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 
-                # Emojilerle durum gösterimi
                 if status_code == "BOŞ": status_emoji = "⚪️ BOŞ"
                 elif status_code == "LONG": status_emoji = "🟢 LONG"
                 elif status_code == "SHORT": status_emoji = "🔴 SHORT"
@@ -340,7 +358,6 @@ def main():
 
             output_text = "\n".join(lines)
             
-            # Konsol loglarında HTML taglarını silerek temiz bir görünüm veriyoruz
             print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
 
             for event in trade_events:
@@ -348,7 +365,7 @@ def main():
 
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                send_telegram_msg(output_text) # <pre> tag'i kaldırıldı, doğrudan mobil uyumlu HTML gönderiliyor.
+                send_telegram_msg(output_text)
                 last_telegram_time = now_ts
 
             save_state(positions, wallet_balances, realized_pnl, trade_number)
