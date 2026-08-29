@@ -27,9 +27,9 @@ BASE_URLS = [
     "https://fapi2.binance.com/fapi/v1/klines"
 ]
 
-# XAUUSDT yerine Binance Futures tarafında PAXGUSDT tercih edilmelidir
+# PAXGUSDT Binance Futures'da olmadığı için yerine LTCUSDT eklendi.
 SYMBOLS = {
-    "PAXGUSDT": "XAU", "BTCUSDT": "BTC",
+    "LTCUSDT": "LTC", "BTCUSDT": "BTC",
     "ETHUSDT": "ETH", "SOLUSDT": "SOL", "BNBUSDT": "BNB",
     "XRPUSDT": "XRP", "ADAUSDT": "ADA", "AVAXUSDT": "AVAX",
     "LINKUSDT": "LINK", "DOGEUSDT": "DOGE"
@@ -118,7 +118,13 @@ def http_get_json(url):
         req = Request(url, headers=headers)
         with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
             return json.loads(response.read().decode("utf-8"))
-    except Exception:
+    except HTTPError as e:
+        # Hata gizlenmiyor, konsola basılıyor
+        error_body = e.read().decode("utf-8")
+        print(f"\n[BİNANCE API HATASI] HTTP {e.code} - Adres: {url}\nDetay: {error_body}")
+        return None
+    except Exception as e:
+        print(f"\n[API BAĞLANTI HATASI] Beklenmeyen Hata ({url}): {e}")
         return None
 
 def get_klines(symbol):
@@ -355,3 +361,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
