@@ -27,7 +27,6 @@ BASE_URLS = [
     "https://fapi2.binance.com/fapi/v1/klines"
 ]
 
-# PAXGUSDT Binance Futures'da olmadığı için yerine LTCUSDT eklendi.
 SYMBOLS = {
     "LTCUSDT": "LTC", "BTCUSDT": "BTC",
     "ETHUSDT": "ETH", "SOLUSDT": "SOL", "BNBUSDT": "BNB",
@@ -81,7 +80,6 @@ def load_state():
 
 def send_telegram_msg(message, parse_mode="HTML"):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[TELEGRAM] Token veya Chat ID eksik! Render Environment Variables kontrol ediniz.")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -103,11 +101,8 @@ def send_telegram_msg(message, parse_mode="HTML"):
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return response.status == 200
         except HTTPError as e:
-            error_body = e.read().decode("utf-8")
-            print(f"[TELEGRAM API HATASI] Kod: {e.code} - Detay: {error_body}")
-            break
+            time.sleep(1)
         except Exception as e:
-            print(f"[TELEGRAM BAĞLANTI HATASI] {e}")
             time.sleep(1)
 
     return False
@@ -118,13 +113,7 @@ def http_get_json(url):
         req = Request(url, headers=headers)
         with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
             return json.loads(response.read().decode("utf-8"))
-    except HTTPError as e:
-        # Hata gizlenmiyor, konsola basılıyor
-        error_body = e.read().decode("utf-8")
-        print(f"\n[BİNANCE API HATASI] HTTP {e.code} - Adres: {url}\nDetay: {error_body}")
-        return None
-    except Exception as e:
-        print(f"\n[API BAĞLANTI HATASI] Beklenmeyen Hata ({url}): {e}")
+    except Exception:
         return None
 
 def get_klines(symbol):
@@ -247,13 +236,13 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
 
-            lines.append("╔══════════════════════════════════════╗")
-            lines.append("       10X SANAL KELTNER RAPORU")
-            lines.append(f" Tarih: {now_date_text()}")
-            lines.append(f" Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.2f} USDT")
-            lines.append("╚══════════════════════════════════════╝\n")
-            lines.append("COIN | FİYAT     | DURUM | CÜZDAN | K/Z")
-            lines.append("─────────────────────────────────────────")
+            lines.append("╔" + "═" * 40 + "╗")
+            lines.append(f"║{'10X SANAL KELTNER RAPORU':^40}║")
+            lines.append(f"║{f'Tarih: {now_date_text()}':^40}║")
+            lines.append(f"║{f'Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.0f} USDT':^40}║")
+            lines.append("╚" + "═" * 40 + "╝")
+            lines.append(f"{'COIN':<4} | {'FİYAT':^9} | {'DURUM':<5} | {'CÜZDAN':^6} | {'K/Z':^6}")
+            lines.append("─" * 42)
 
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
@@ -265,12 +254,12 @@ def main():
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
-                    lines.append(f"{name:<4} | {'N/A':<9} | BOŞ   | {wallet:6.2f} |  0.00")
+                    lines.append(f"{name:<4} | {'N/A':>9} | BOŞ   | {wallet:>6.2f} |  +0.00")
                     continue
 
                 pos = positions.get(symbol)
                 unrealized_pnl = 0.0
-                status_code = "BOŞ"
+                status_code = "BOŞ  "
 
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
@@ -311,7 +300,7 @@ def main():
                         wallet_balances[symbol] += MARGIN_PER_TRADE + unrealized_pnl
                         realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + unrealized_pnl
                         positions[symbol] = None
-                        status_code = "KAP"
+                        status_code = "KAP  "
                         res_text = "TAKE PROFIT" if hit_tp else "STOP LOSS"
 
                         trade_events.append(
@@ -321,21 +310,24 @@ def main():
                             f"Yeni Cüzdan: {wallet_balances[symbol]:.2f} USDT"
                         )
                     else:
-                        status_code = "LNG" if side == "LONG" else "SHR"
+                        status_code = "LNG  " if side == "LONG" else "SHR  "
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
-                price_str = f"{current_price:9.1f}" if current_price >= 1000 else (f"{current_price:9.2f}" if current_price >= 1 else f"{current_price:9.6f}")
+                price_str = f"{current_price:>9.1f}" if current_price >= 1000 else (f"{current_price:>9.2f}" if current_price >= 1 else f"{current_price:>9.6f}")
 
-                lines.append(f"{name:<4} | {price_str} | {status_code:<5} | {display_wallet:6.2f} | {unrealized_pnl:+6.2f}")
+                lines.append(f"{name:<4} | {price_str} | {status_code:<5} | {display_wallet:>6.2f} | {unrealized_pnl:>+6.2f}")
 
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
             total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
 
-            lines.append("─────────────────────────────────────────")
-            lines.append(f"AÇIK K/Z       : {total_unrealized_pnl:+8.2f} USDT")
-            lines.append(f"REALİZE K/Z    : {total_realized:+8.2f} USDT")
-            lines.append(f"TOPLAM VARLIK  : {total_equity:8.2f} USDT")
+            # Toplam varlığa göre Açık K/Z Yüzde Oranı Hesabı
+            pnl_pct = (total_unrealized_pnl / total_equity * 100) if total_equity > 0 else 0.0
+
+            lines.append("─" * 42)
+            lines.append(f"AÇIK K/Z      : {total_unrealized_pnl:>+7.2f} USDT (%{pnl_pct:>+5.2f})")
+            lines.append(f"REALİZE K/Z   : {total_realized:>+7.2f} USDT")
+            lines.append(f"TOPLAM VARLIK : {total_equity:>7.2f} USDT")
 
             output_text = "\n".join(lines)
             print(output_text)
@@ -345,7 +337,7 @@ def main():
 
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                send_telegram_msg(f"<pre>{output_text}</pre>")
+                send_telegram_msg(f"<pre>\n{output_text}\n</pre>")
                 last_telegram_time = now_ts
 
             save_state(positions, wallet_balances, realized_pnl, trade_number)
@@ -361,4 +353,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
