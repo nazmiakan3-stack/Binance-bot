@@ -4,7 +4,6 @@
 import json
 import time
 import os
-import atexit
 import random
 from datetime import datetime, timezone, timedelta
 from urllib.request import Request, urlopen
@@ -27,6 +26,8 @@ BASE_URLS = [
     "https://fapi1.binance.com/fapi/v1/klines",
     "https://fapi2.binance.com/fapi/v1/klines"
 ]
+
+TICKER_PRICE_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
 
 SYMBOLS = {
     "LTCUSDT": "LTC", "BTCUSDT": "BTC",
@@ -122,6 +123,13 @@ def http_get_json(url, retries=2):
                 return None
     return None
 
+def get_all_prices():
+    """Tüm coinlerin fiyatını tek bir istekte toplu çeker (N/A sorununu kökten çözer)"""
+    data = http_get_json(TICKER_PRICE_URL)
+    if data and isinstance(data, list):
+        return {item["symbol"]: float(item["price"]) for item in data}
+    return {}
+
 def get_klines(symbol):
     for base_url in BASE_URLS:
         url = f"{base_url}?symbol={symbol}&interval={TIMEFRAME}&limit={LIMIT}"
@@ -173,34 +181,35 @@ def calc_rsi(closes, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def analyze(symbol):
+def analyze(symbol, all_prices):
     data = get_klines(symbol)
-    if not data or len(data) < 50:
-        return (symbol, None, None, None)
+    current_price = all_prices.get(symbol)
+
+    if not data or len(data) < 50 or current_price is None:
+        return (symbol, None, current_price, None)
 
     closed = data[:-1]
     closes = [float(row[4]) for row in closed]
     highs = [float(row[2]) for row in closed]
     lows = [float(row[3]) for row in closed]
 
-    price = closes[-1]
     ema = calc_ema(closes, 20)
     atr = calc_atr(highs, lows, closes, 20)
 
     if not ema or atr == 0:
-        return (symbol, None, None, None)
+        return (symbol, None, current_price, None)
 
     kc_lower = ema[-1] - atr * 2
     kc_upper = ema[-1] + atr * 2
     rsi = calc_rsi(closes, 14)
 
     signal = None
-    if price < kc_lower and rsi <= 25:
+    if current_price < kc_lower and rsi <= 25:
         signal = "LONG"
-    elif price > kc_upper and rsi >= 75:
+    elif current_price > kc_upper and rsi >= 75:
         signal = "SHORT"
 
-    return (symbol, signal, price, rsi)
+    return (symbol, signal, current_price, rsi)
 
 # --- SUNUCU, ANA DÖNGÜ VE KENDİ KENDİNİ UYANDIRMA SİSTEMİ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -224,13 +233,10 @@ def run_health_check_server():
     server.serve_forever()
 
 def self_ping():
-    # DİKKAT: Buradaki URL'yi KESİNLİKLE kendi binance-bot Render URL'n ile değiştir!
-    url = "https://BURAYA_RENDER_LINKINI_YAZ.onrender.com"
+    url = os.getenv("RENDER_EXTERNAL_URL", "https://BURAYA_RENDER_LINKINI_YAZ.onrender.com")
     while True:
-        # 10 ile 12 dakika (600 ile 720 saniye) arasında rastgele bir süre seç
         bekleme_suresi = random.randint(600, 720) 
         time.sleep(bekleme_suresi) 
-        
         try:
             req = Request(url, headers={"User-Agent": "BinanceBot-KeepAlive"})
             with urlopen(req, timeout=10) as response:
@@ -241,10 +247,7 @@ def self_ping():
             print(f"[{now_date_text()}] ⚠️ Self-Ping hatasi: {e}")
 
 def main():
-    # 1. Web sunucusunu arka planda başlat
     threading.Thread(target=run_health_check_server, daemon=True).start()
-    
-    # 2. Kendi kendini uyandırma (Self-Ping) sistemini arka planda başlat
     threading.Thread(target=self_ping, daemon=True).start()
 
     state = load_state()
@@ -270,7 +273,9 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
-            # Mobil Uyumlu Liste Tasarımı
+            # 1. Önce tüm fiyatları TEK İSTEKLE çekiyoruz (Hızlı ve güvenli)
+            all_prices = get_all_prices()
+
             lines = []
             lines.append("🎯 <b>10X SANAL KELTNER RAPORU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
@@ -278,7 +283,7 @@ def main():
             lines.append("<b>🪙 COIN DURUMLARI</b>")
 
             with ThreadPoolExecutor(max_workers=5) as executor:
-                results = list(executor.map(analyze, SYMBOLS.keys()))
+                results = list(executor.map(lambda s: analyze(s, all_prices), SYMBOLS.keys()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
 
@@ -348,7 +353,6 @@ def main():
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 
-                # Emojilerle durum gösterimi
                 if status_code == "BOŞ": status_emoji = "⚪️ BOŞ"
                 elif status_code == "LONG": status_emoji = "🟢 LONG"
                 elif status_code == "SHORT": status_emoji = "🔴 SHORT"
@@ -369,8 +373,7 @@ def main():
 
             output_text = "\n".join(lines)
             
-            # Konsol loglarında HTML taglarını silerek temiz bir görünüm veriyoruz
-            print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
+            print("\n" + output_text.replace('<b>', '').replace('</i>', '').replace('<i>', '').replace('</b>', ''))
 
             for event in trade_events:
                 send_telegram_msg(event)
@@ -393,3 +396,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
