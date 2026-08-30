@@ -19,15 +19,13 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# BINANCE API
+# BINANCE / COINGECKO API AYARLARI
 # ============================================================
 BASE_URLS = [
     "https://fapi.binance.com/fapi/v1/klines",
     "https://fapi1.binance.com/fapi/v1/klines",
     "https://fapi2.binance.com/fapi/v1/klines"
 ]
-
-TICKER_PRICE_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
 
 SYMBOLS = {
     "LTCUSDT": "LTC", "BTCUSDT": "BTC",
@@ -124,10 +122,32 @@ def http_get_json(url, retries=2):
     return None
 
 def get_all_prices():
-    """Tüm coinlerin fiyatını tek bir istekte toplu çeker (N/A sorununu kökten çözer)"""
-    data = http_get_json(TICKER_PRICE_URL)
-    if data and isinstance(data, list):
-        return {item["symbol"]: float(item["price"]) for item in data}
+    """Coingecko API üzerinden IP engeline takılmadan toplu fiyat çeker."""
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=litecoin,bitcoin,ethereum,solana,binancecoin,ripple,cardano,avalanche-2,chainlink,dogecoin&vs_currencies=usd"
+    data = http_get_json(url)
+    
+    if data and isinstance(data, dict):
+        mapping = {
+            "litecoin": "LTCUSDT",
+            "bitcoin": "BTCUSDT",
+            "ethereum": "ETHUSDT",
+            "solana": "SOLUSDT",
+            "binancecoin": "BNBUSDT",
+            "ripple": "XRPUSDT",
+            "cardano": "ADAUSDT",
+            "avalanche-2": "AVAXUSDT",
+            "chainlink": "LINKUSDT",
+            "dogecoin": "DOGEUSDT"
+        }
+        
+        prices = {}
+        for cg_id, symbol in mapping.items():
+            if cg_id in data and "usd" in data[cg_id]:
+                prices[symbol] = float(data[cg_id]["usd"])
+        
+        if prices:
+            return prices
+
     return {}
 
 def get_klines(symbol):
@@ -273,7 +293,7 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
-            # 1. Önce tüm fiyatları TEK İSTEKLE çekiyoruz (Hızlı ve güvenli)
+            # 1. Fiyatları CoinGecko üzerinden güvenle çekiyoruz
             all_prices = get_all_prices()
 
             lines = []
@@ -396,4 +416,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
