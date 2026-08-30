@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+KELTNER 10X SANAL BOT - MEXC Futures
+Strateji: Keltner Channel + RSI (aşırı alım/satım)
+Dosya: keltner_10x_mexc_bot.py
+"""
 
 import json
 import time
@@ -19,22 +24,19 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 # ============================================================
-# BINANCE / COINGECKO API AYARLARI
+# MEXC FUTURES API
 # ============================================================
-BASE_URLS = [
-    "https://fapi.binance.com/fapi/v1/klines",
-    "https://fapi1.binance.com/fapi/v1/klines",
-    "https://fapi2.binance.com/fapi/v1/klines"
-]
+MEXC_BASE = "https://contract.mexc.com/api/v1/contract/kline"
 
+# MEXC sembol formatı: BTC_USDT (underscore)
 SYMBOLS = {
-    "LTCUSDT": "LTC", "BTCUSDT": "BTC",
-    "ETHUSDT": "ETH", "SOLUSDT": "SOL", "BNBUSDT": "BNB",
-    "XRPUSDT": "XRP", "ADAUSDT": "ADA", "AVAXUSDT": "AVAX",
-    "LINKUSDT": "LINK", "DOGEUSDT": "DOGE"
+    "LTC_USDT": "LTC", "BTC_USDT": "BTC",
+    "ETH_USDT": "ETH", "SOL_USDT": "SOL", "BNB_USDT": "BNB",
+    "XRP_USDT": "XRP", "ADA_USDT": "ADA", "AVAX_USDT": "AVAX",
+    "LINK_USDT": "LINK", "DOGE_USDT": "DOGE"
 }
 
-TIMEFRAME = "15m"
+TIMEFRAME = "Min15"          # MEXC interval: Min15
 LIMIT = 100
 LOOP_SECONDS = 60
 
@@ -46,14 +48,16 @@ TAKE_PROFIT_PCT = 0.02
 STOP_LOSS_PCT = 0.05
 COMMISSION_RATE = 0.0004
 
-STATE_FILE = "bot_state.json"
+STATE_FILE = "keltner_10x_mexc_state.json"
 REQUEST_TIMEOUT = 10
 RETRY_COUNT = 3
 TELEGRAM_NOTIFY_INTERVAL = 15 * 60
 TURKEY_TZ = timezone(timedelta(hours=3))
 
+
 def now_date_text():
     return datetime.now(TURKEY_TZ).strftime("%d.%m.%Y %H:%M:%S")
+
 
 def save_state(positions, wallet_balances, realized_pnl, trade_number):
     state = {
@@ -69,6 +73,7 @@ def save_state(positions, wallet_balances, realized_pnl, trade_number):
     except Exception as e:
         print(f"Durum kaydedilemedi: {e}")
 
+
 def load_state():
     if not os.path.exists(STATE_FILE):
         return None
@@ -77,6 +82,7 @@ def load_state():
             return json.load(f)
     except Exception:
         return None
+
 
 def send_telegram_msg(message, parse_mode="HTML"):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -107,6 +113,7 @@ def send_telegram_msg(message, parse_mode="HTML"):
 
     return False
 
+
 def http_get_json(url, retries=2):
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     for attempt in range(retries):
@@ -116,47 +123,47 @@ def http_get_json(url, retries=2):
                 return json.loads(response.read().decode("utf-8"))
         except Exception:
             if attempt < retries - 1:
-                time.sleep(1) 
+                time.sleep(1)
             else:
                 return None
     return None
 
-def get_all_prices():
-    """Coingecko API üzerinden IP engeline takılmadan toplu fiyat çeker."""
-    url = "https://api.coingecko.com/api/v3/simple/price?ids=litecoin,bitcoin,ethereum,solana,binancecoin,ripple,cardano,avalanche-2,chainlink,dogecoin&vs_currencies=usd"
-    data = http_get_json(url)
-    
-    if data and isinstance(data, dict):
-        mapping = {
-            "litecoin": "LTCUSDT",
-            "bitcoin": "BTCUSDT",
-            "ethereum": "ETHUSDT",
-            "solana": "SOLUSDT",
-            "binancecoin": "BNBUSDT",
-            "ripple": "XRPUSDT",
-            "cardano": "ADAUSDT",
-            "avalanche-2": "AVAXUSDT",
-            "chainlink": "LINKUSDT",
-            "dogecoin": "DOGEUSDT"
-        }
-        
-        prices = {}
-        for cg_id, symbol in mapping.items():
-            if cg_id in data and "usd" in data[cg_id]:
-                prices[symbol] = float(data[cg_id]["usd"])
-        
-        if prices:
-            return prices
-
-    return {}
 
 def get_klines(symbol):
-    for base_url in BASE_URLS:
-        url = f"{base_url}?symbol={symbol}&interval={TIMEFRAME}&limit={LIMIT}"
-        data = http_get_json(url)
-        if data and isinstance(data, list) and len(data) > 0:
-            return data
-    return None
+    """
+    MEXC Futures kline verisini çeker ve Binance benzeri listeye çevirir.
+    Dönüş: [[time, open, high, low, close, volume], ...]  (en eski → en yeni)
+    """
+    url = f"{MEXC_BASE}/{symbol}?interval={TIMEFRAME}"
+    raw = http_get_json(url)
+    if not raw or not raw.get("success") or not raw.get("data"):
+        return None
+
+    data = raw["data"]
+    times = data.get("time", [])
+    opens = data.get("open", [])
+    highs = data.get("high", [])
+    lows = data.get("low", [])
+    closes = data.get("close", [])
+    vols = data.get("vol", [])
+
+    if not times or len(times) < 50:
+        return None
+
+    # Son LIMIT kadar al (en yeni veriler)
+    n = min(LIMIT, len(times))
+    klines = []
+    for i in range(-n, 0):
+        klines.append([
+            times[i] * 1000,          # ms (uyumluluk)
+            float(opens[i]),
+            float(highs[i]),
+            float(lows[i]),
+            float(closes[i]),
+            float(vols[i]) if vols else 0.0
+        ])
+    return klines
+
 
 def calc_ema(data, period):
     if len(data) < period:
@@ -167,6 +174,7 @@ def calc_ema(data, period):
     for price in data[period:]:
         ema.append(price * k + ema[-1] * (1 - k))
     return ema
+
 
 def calc_atr(highs, lows, closes, period=20):
     trs = []
@@ -180,6 +188,7 @@ def calc_atr(highs, lows, closes, period=20):
     if len(trs) < period:
         return 0.0
     return sum(trs[-period:]) / period
+
 
 def calc_rsi(closes, period=14):
     if len(closes) <= period:
@@ -201,35 +210,37 @@ def calc_rsi(closes, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
-def analyze(symbol, all_prices):
+
+def analyze(symbol):
     data = get_klines(symbol)
-    current_price = all_prices.get(symbol)
+    if not data or len(data) < 50:
+        return (symbol, None, None, None)
 
-    if not data or len(data) < 50 or current_price is None:
-        return (symbol, None, current_price, None)
-
-    closed = data[:-1]
+    # Son mum henüz kapanmamış olabilir → bir öncekini kullan
+    closed = data[:-1] if len(data) > 1 else data
     closes = [float(row[4]) for row in closed]
     highs = [float(row[2]) for row in closed]
     lows = [float(row[3]) for row in closed]
 
+    price = closes[-1]
     ema = calc_ema(closes, 20)
     atr = calc_atr(highs, lows, closes, 20)
 
     if not ema or atr == 0:
-        return (symbol, None, current_price, None)
+        return (symbol, None, None, None)
 
     kc_lower = ema[-1] - atr * 2
     kc_upper = ema[-1] + atr * 2
     rsi = calc_rsi(closes, 14)
 
     signal = None
-    if current_price < kc_lower and rsi <= 25:
+    if price < kc_lower and rsi <= 25:
         signal = "LONG"
-    elif current_price > kc_upper and rsi >= 75:
+    elif price > kc_upper and rsi >= 75:
         signal = "SHORT"
 
-    return (symbol, signal, current_price, rsi)
+    return (symbol, signal, price, rsi)
+
 
 # --- SUNUCU, ANA DÖNGÜ VE KENDİ KENDİNİ UYANDIRMA SİSTEMİ ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -242,29 +253,34 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"<html><body><h1>Binance Bot Aktif ve Calisiyor!</h1></body></html>")
+        self.wfile.write(b"<html><body><h1>Keltner 10x MEXC Bot Aktif!</h1></body></html>")
 
     def log_message(self, format, *args):
         return
+
 
 def run_health_check_server():
     port = int(os.getenv("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
+
 def self_ping():
-    url = os.getenv("RENDER_EXTERNAL_URL", "https://BURAYA_RENDER_LINKINI_YAZ.onrender.com")
+    # DİKKAT: Buradaki URL'yi KESİNLİKLE kendi Render URL'in ile değiştir!
+    url = "https://BURAYA_RENDER_LINKINI_YAZ.onrender.com"
     while True:
-        bekleme_suresi = random.randint(600, 720) 
-        time.sleep(bekleme_suresi) 
+        bekleme_suresi = random.randint(600, 720)
+        time.sleep(bekleme_suresi)
+
         try:
-            req = Request(url, headers={"User-Agent": "BinanceBot-KeepAlive"})
+            req = Request(url, headers={"User-Agent": "Keltner10xMEXC-KeepAlive"})
             with urlopen(req, timeout=10) as response:
                 dakika = bekleme_suresi // 60
                 saniye = bekleme_suresi % 60
                 print(f"[{now_date_text()}] 🔄 Self-Ping: {dakika} dk {saniye} sn sonra istek atildi. (Durum: {response.status})")
         except Exception as e:
             print(f"[{now_date_text()}] ⚠️ Self-Ping hatasi: {e}")
+
 
 def main():
     threading.Thread(target=run_health_check_server, daemon=True).start()
@@ -282,9 +298,9 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print("Sistem başlatılıyor...")
-    send_telegram_msg(f"🚀 <b>BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nSistem Render üzerinde aktifleştirildi.")
-    time.sleep(3) 
+    print("Keltner 10x MEXC Bot başlatılıyor...")
+    send_telegram_msg(f"🚀 <b>KELTNER 10X MEXC BOT BAŞLATILDI!</b>\nTarih: {now_date_text()}\nVeri kaynağı: MEXC Futures")
+    time.sleep(3)
 
     last_telegram_time = 0
 
@@ -292,18 +308,15 @@ def main():
         try:
             trade_events = []
             total_unrealized_pnl = 0.0
-            
-            # 1. Fiyatları CoinGecko üzerinden güvenle çekiyoruz
-            all_prices = get_all_prices()
 
             lines = []
-            lines.append("🎯 <b>10X SANAL KELTNER RAPORU</b>")
+            lines.append("🎯 <b>10X SANAL KELTNER RAPORU (MEXC)</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
             lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT\n")
             lines.append("<b>🪙 COIN DURUMLARI</b>")
 
             with ThreadPoolExecutor(max_workers=5) as executor:
-                results = list(executor.map(lambda s: analyze(s, all_prices), SYMBOLS.keys()))
+                results = list(executor.map(analyze, SYMBOLS.keys()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
 
@@ -338,81 +351,4 @@ def main():
                     pos = positions[symbol]
 
                     trade_events.append(
-                        f"🚨 <b>YENİ POZİSYON</b>\n"
-                        f"Coin: {name} | Yön: {signal}\n"
-                        f"Giriş: {current_price:.6f}\n"
-                        f"TP: {tp:.6f} | SL: {sl:.6f}"
-                    )
-
-                if pos is not None:
-                    side, entry = pos["side"], float(pos["entry"])
-                    pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
-                    gross_pnl = POSITION_SIZE * pct
-                    commission = POSITION_SIZE * COMMISSION_RATE
-                    unrealized_pnl = gross_pnl - commission
-                    total_unrealized_pnl += unrealized_pnl
-
-                    hit_tp = (side == "LONG" and current_price >= pos["tp"]) or (side == "SHORT" and current_price <= pos["tp"])
-                    hit_sl = (side == "LONG" and current_price <= pos["sl"]) or (side == "SHORT" and current_price >= pos["sl"])
-
-                    if hit_tp or hit_sl:
-                        wallet_balances[symbol] += MARGIN_PER_TRADE + unrealized_pnl
-                        realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + unrealized_pnl
-                        positions[symbol] = None
-                        status_code = "KAPALI"
-                        res_text = "TAKE PROFIT" if hit_tp else "STOP LOSS"
-
-                        trade_events.append(
-                            f"✅ <b>POZİSYON KAPANDI</b>\n"
-                            f"Coin: {name} | Sonuç: {res_text}\n"
-                            f"P/L: {unrealized_pnl:+.2f} USDT\n"
-                            f"Yeni Cüzdan: {wallet_balances[symbol]:.2f} USDT"
-                        )
-                    else:
-                        status_code = "LONG" if side == "LONG" else "SHORT"
-
-                display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
-                
-                if status_code == "BOŞ": status_emoji = "⚪️ BOŞ"
-                elif status_code == "LONG": status_emoji = "🟢 LONG"
-                elif status_code == "SHORT": status_emoji = "🔴 SHORT"
-                elif status_code == "KAPALI": status_emoji = "✅ KAP"
-                
-                lines.append(f"🔸 <b>{name}:</b> {current_price}")
-                lines.append(f"└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
-
-            total_cash = sum(wallet_balances.values())
-            total_realized = sum(realized_pnl.values())
-            total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
-            pnl_pct = (total_unrealized_pnl / total_equity * 100) if total_equity > 0 else 0.0
-
-            lines.append("\n<b>📊 GENEL ÖZET</b>")
-            lines.append(f"💵 <b>Toplam Varlık:</b> {total_equity:.2f} USDT")
-            lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (<b>%{pnl_pct:+.2f}</b>)")
-            lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:+.2f} USDT")
-
-            output_text = "\n".join(lines)
-            
-            print("\n" + output_text.replace('<b>', '').replace('</i>', '').replace('<i>', '').replace('</b>', ''))
-
-            for event in trade_events:
-                send_telegram_msg(event)
-
-            now_ts = time.time()
-            if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                send_telegram_msg(output_text)
-                last_telegram_time = now_ts
-
-            save_state(positions, wallet_balances, realized_pnl, trade_number)
-            time.sleep(LOOP_SECONDS)
-
-        except KeyboardInterrupt:
-            print("\nBot kapatılıyor...")
-            save_state(positions, wallet_balances, realized_pnl, trade_number)
-            break
-        except Exception as e:
-            print(f"Hata oluştu: {e}")
-            time.sleep(15)
-
-if __name__ == "__main__":
-    main()
+                        f"🚨 <b>YENİ POZİSYON</
