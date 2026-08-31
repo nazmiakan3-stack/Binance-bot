@@ -170,26 +170,29 @@ def calc_rsi(closes, period=14):
 def analyze(symbol):
     raw_data = get_klines(symbol)
     if not raw_data or "close" not in raw_data:
-        return (symbol, None, None, None)
+        return (symbol, None, None, None, None, None)
 
     closes = [float(x) for x in raw_data["close"]]
     highs = [float(x) for x in raw_data["high"]]
     lows = [float(x) for x in raw_data["low"]]
 
     if len(closes) < 50:
-        return (symbol, None, None, None)
+        return (symbol, None, None, None, None, None)
 
     closed_closes = closes[:-1]
     closed_highs = highs[:-1]
     closed_lows = lows[:-1]
 
+    # Fiyat ve iğne değerlerini güncel mumdan alıyoruz
     price = closes[-1]
+    current_high = highs[-1]
+    current_low = lows[-1]
 
     ema = calc_ema(closed_closes, 20)
     atr = calc_atr(closed_highs, closed_lows, closed_closes, 20)
 
     if not ema or atr == 0:
-        return (symbol, None, price, None)
+        return (symbol, None, price, None, current_high, current_low)
 
     kc_lower = ema[-1] - atr * 1.5
     kc_upper = ema[-1] + atr * 1.5
@@ -202,7 +205,8 @@ def analyze(symbol):
     elif price > kc_upper and rsi >= 70:
         signal = "SHORT"
 
-    return (symbol, signal, price, rsi)
+    # high ve low değerlerini de listeye dahil ediyoruz
+    return (symbol, signal, price, rsi, current_high, current_low)
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
@@ -275,7 +279,8 @@ def main():
             analysis_dict = {r[0]: r[1:] for r in results}
 
             for symbol, name in SYMBOLS.items():
-                signal, current_price, rsi = analysis_dict.get(symbol, (None, None, None))
+                # cur_high ve cur_low değişkenlerini çekiyoruz
+                signal, current_price, rsi, cur_high, cur_low = analysis_dict.get(symbol, (None, None, None, None, None))
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
@@ -319,17 +324,19 @@ def main():
                     hit_tp = False
                     hit_sl = False
                     
+                    # BURASI DEĞİŞTİ: Artık iğne uçlarını (high/low) kontrol ediyor
                     if side == "LONG":
-                        if current_price >= pos["tp"]:
+                        if cur_high >= pos["tp"]:  # Yukarı iğne TP'ye vurdu mu?
                             hit_tp = True
-                        elif current_price <= pos["sl"]:
+                        elif cur_low <= pos["sl"]: # Aşağı iğne SL'ye vurdu mu?
                             hit_sl = True
                     else: # SHORT
-                        if current_price <= pos["tp"]:
+                        if cur_low <= pos["tp"]:   # Aşağı iğne TP'ye vurdu mu?
                             hit_tp = True
-                        elif current_price >= pos["sl"]:
+                        elif cur_high >= pos["sl"]: # Yukarı iğne SL'ye vurdu mu?
                             hit_sl = True
 
+                    # PNL Hesabı
                     pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
                     gross_pnl = POSITION_SIZE * pct
                     commission = POSITION_SIZE * COMMISSION_RATE
@@ -345,7 +352,7 @@ def main():
                         realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + final_pnl
                         positions[symbol] = None
                         status_code = "KAPALI"
-                        res_text = "TAKE PROFIT (Kâr Al)" if hit_tp else "STOP LOSS (Zarar Kes)"
+                        res_text = "🎯 TAKE PROFIT (Kâr Al)" if hit_tp else "🛑 STOP LOSS (Zarar Kes)"
 
                         trade_events.append(
                             f"✅ <b>POZİSYON KAPANDI</b>\n"
