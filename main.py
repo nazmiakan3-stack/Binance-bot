@@ -23,7 +23,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # ============================================================
 MEXC_BASE_URL = "https://contract.mexc.com/api/v1/contract/kline"
 
-# MEXC Futures sembol formatı (Alt çizgi ile)
 SYMBOLS = {
     "LTC_USDT": "LTC", "BTC_USDT": "BTC",
     "ETH_USDT": "ETH", "SOL_USDT": "SOL", "BNB_USDT": "BNB",
@@ -31,7 +30,7 @@ SYMBOLS = {
     "LINK_USDT": "LINK", "DOGE_USDT": "DOGE"
 }
 
-TIMEFRAME = "Min15"  # MEXC 15 dakikalık formatı
+TIMEFRAME = "Min15"
 LIMIT = 100
 LOOP_SECONDS = 60
 
@@ -119,7 +118,6 @@ def http_get_json(url, retries=2):
     return None
 
 def get_klines(symbol):
-    # MEXC Futures Klines Endpoint yapısı: /api/v1/contract/kline/{symbol}?interval=...
     url = f"{MEXC_BASE_URL}/{symbol}?interval={TIMEFRAME}"
     data = http_get_json(url)
     if data and data.get("success") and "data" in data:
@@ -172,29 +170,26 @@ def calc_rsi(closes, period=14):
 def analyze(symbol):
     raw_data = get_klines(symbol)
     if not raw_data or "close" not in raw_data:
-        return (symbol, None, None, None, None, None)
+        return (symbol, None, None, None)
 
     closes = [float(x) for x in raw_data["close"]]
     highs = [float(x) for x in raw_data["high"]]
     lows = [float(x) for x in raw_data["low"]]
 
     if len(closes) < 50:
-        return (symbol, None, None, None, None, None)
+        return (symbol, None, None, None)
 
-    # İşlem yapabilmek için son tamamlanmış mumu ve güncel mum verilerini ayırıyoruz
     closed_closes = closes[:-1]
     closed_highs = highs[:-1]
     closed_lows = lows[:-1]
 
     price = closes[-1]
-    current_high = highs[-1]
-    current_low = lows[-1]
 
     ema = calc_ema(closed_closes, 20)
     atr = calc_atr(closed_highs, closed_lows, closed_closes, 20)
 
     if not ema or atr == 0:
-        return (symbol, None, None, None, current_high, current_low)
+        return (symbol, None, price, None)
 
     kc_lower = ema[-1] - atr * 2
     kc_upper = ema[-1] + atr * 2
@@ -206,9 +201,8 @@ def analyze(symbol):
     elif price > kc_upper and rsi >= 75:
         signal = "SHORT"
 
-    return (symbol, signal, price, rsi, current_high, current_low)
+    return (symbol, signal, price, rsi)
 
-# --- SUNUCU VE KEEP-ALIVE ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
@@ -280,7 +274,7 @@ def main():
             analysis_dict = {r[0]: r[1:] for r in results}
 
             for symbol, name in SYMBOLS.items():
-                signal, current_price, rsi, cur_high, cur_low = analysis_dict.get(symbol, (None, None, None, None, None))
+                signal, current_price, rsi = analysis_dict.get(symbol, (None, None, None))
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
@@ -317,26 +311,25 @@ def main():
                         f"TP: {tp:.6f} | SL: {sl:.6f}"
                     )
 
-                # 2. Açık pozisyon yönetimi ve FİTİL KONTROLÜ
+                # 2. Açık pozisyon yönetimi (Anlık fiyat üzerinden TP / SL kontrolü)
                 if pos is not None:
                     side, entry = pos["side"], float(pos["entry"])
                     
-                    # Fiyat fitillerini kontrol ederek TP veya SL'ye iğne atıp atmadığını yakalıyoruz
                     hit_tp = False
                     hit_sl = False
                     
                     if side == "LONG":
-                        if cur_high >= pos["tp"]:
+                        if current_price >= pos["tp"]:
                             hit_tp = True
-                        elif cur_low <= pos["sl"]:
+                        elif current_price <= pos["sl"]:
                             hit_sl = True
                     else: # SHORT
-                        if cur_low <= pos["tp"]:
+                        if current_price <= pos["tp"]:
                             hit_tp = True
-                        elif cur_high >= pos["sl"]:
+                        elif current_price >= pos["sl"]:
                             hit_sl = True
 
-                    # Anlık PNL hesaplaması (görüntü için güncel fiyat baz alınır)
+                    # Anlık PNL hesaplaması
                     pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
                     gross_pnl = POSITION_SIZE * pct
                     commission = POSITION_SIZE * COMMISSION_RATE
@@ -344,7 +337,6 @@ def main():
                     total_unrealized_pnl += unrealized_pnl
 
                     if hit_tp or hit_sl:
-                        # Eğer hedefe iğne attıysa, tam hedef fiyatı üzerinden realize edip kapatıyoruz
                         exit_price = pos["tp"] if hit_tp else pos["sl"]
                         exit_pct = (exit_price - entry) / entry if side == "LONG" else (entry - exit_price) / entry
                         final_pnl = (POSITION_SIZE * exit_pct) - commission
@@ -399,7 +391,7 @@ def main():
             time.sleep(LOOP_SECONDS)
 
         except KeyboardInterrupt:
-            print("\nBot kapatılıyor...")
+            print("\nBotu kapatılıyor...")
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
@@ -407,4 +399,4 @@ def main():
             time.sleep(15)
 
 if __name__ == "__main__":
-    main()
+main()
