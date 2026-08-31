@@ -191,14 +191,15 @@ def analyze(symbol):
     if not ema or atr == 0:
         return (symbol, None, price, None)
 
-    kc_lower = ema[-1] - atr * 2
-    kc_upper = ema[-1] + atr * 2
+    kc_lower = ema[-1] - atr * 1.5
+    kc_upper = ema[-1] + atr * 1.5
     rsi = calc_rsi(closed_closes, 14)
 
     signal = None
-    if price < kc_lower and rsi <= 25:
+    # RSI eşikleri 30 ve 70 olarak ayarlandı
+    if price < kc_lower and rsi <= 30:
         signal = "LONG"
-    elif price > kc_upper and rsi >= 75:
+    elif price > kc_upper and rsi >= 70:
         signal = "SHORT"
 
     return (symbol, signal, price, rsi)
@@ -311,7 +312,7 @@ def main():
                         f"TP: {tp:.6f} | SL: {sl:.6f}"
                     )
 
-                # 2. Açık pozisyon yönetimi (Anlık fiyat üzerinden TP / SL kontrolü)
+                # 2. Açık pozisyon yönetimi
                 if pos is not None:
                     side, entry = pos["side"], float(pos["entry"])
                     
@@ -329,7 +330,6 @@ def main():
                         elif current_price >= pos["sl"]:
                             hit_sl = True
 
-                    # Anlık PNL hesaplaması
                     pct = (current_price - entry) / entry if side == "LONG" else (entry - current_price) / entry
                     gross_pnl = POSITION_SIZE * pct
                     commission = POSITION_SIZE * COMMISSION_RATE
