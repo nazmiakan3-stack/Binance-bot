@@ -391,7 +391,7 @@ def main():
             time.sleep(LOOP_SECONDS)
 
         except KeyboardInterrupt:
-            print("\nBotu kapatılıyor...")
+            print("\nBot kapatılıyor...")
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
@@ -399,4 +399,4 @@ def main():
             time.sleep(15)
 
 if __name__ == "__main__":
-main()
+    main()
