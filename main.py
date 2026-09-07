@@ -43,7 +43,8 @@ SYMBOLS = {
 }
 
 TIMEFRAME = "Min15"
-LOOP_SECONDS = 60
+LOOP_SECONDS = 10                  # Kontrol süresi: 10 saniye
+TELEGRAM_NOTIFY_INTERVAL = 60      # Rapor yayın aralığı: 1 dakika
 
 STARTING_BALANCE_PER_COIN = 30.0
 MARGIN_PER_TRADE = 25.0
@@ -59,7 +60,6 @@ COMMISSION_RATE = 0.0004
 STATE_FILE = "bot_state.json"
 REQUEST_TIMEOUT = 10
 RETRY_COUNT = 3
-TELEGRAM_NOTIFY_INTERVAL = 14 * 60  # 14 Dakika
 TURKEY_TZ = timezone(timedelta(hours=3))
 
 def now_date_text():
@@ -290,16 +290,8 @@ def main():
 
     print(f"MEXC Bot (15 Coin - Kâr Odaklı) başlatılıyor... Toplam coin: {len(SYMBOLS)}")
     
-    # Başlangıç bildirimi (Sadece ilk açılışta 1 kez)
-    send_telegram_msg(
-        f"🚀 <b>MEXC BOT 15 COİN İLE BAŞLATILDI!</b>\n"
-        f"🗓 <b>Tarih:</b> {now_date_text()}\n"
-        f"Strateji: Trend + Breakout + Trailing\n"
-        f"TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}"
-    )
-    time.sleep(3)
-
-    last_telegram_time = time.time()
+    # İlk açılışta hemen ilk raporu atması için tetikliyoruz
+    last_telegram_time = 0.0
 
     while True:
         try:
@@ -425,10 +417,7 @@ def main():
                     emoji = "🟢" if status_code == "LONG" else "🔴"
                     pnl_yuzde = (unrealized_pnl / MARGIN_PER_TRADE) * 100
                     coin_status_lines.append(
-                        f"{emoji} <b>{name}</b> | {status_code}\n"
-                        f"   Fiyat: {current_price} | Giriş: {pos['entry']:.6f}\n"
-                        f"   TP: {pos['tp']:.6f} | SL: {pos['sl']:.6f}\n"
-                        f"   K/Z: <b>{unrealized_pnl:+.2f}$ (%{pnl_yuzde:+.2f})</b> | Cüzdan: {display_wallet:.2f}$"
+                        f"{emoji} <b>{name}</b>: {current_price} | {status_code} | K/Z: {unrealized_pnl:+.2f}$ (%{pnl_yuzde:+.2f}) | 💵 {display_wallet:.2f}$"
                     )
                 else:
                     coin_status_lines.append(
@@ -449,25 +438,25 @@ def main():
             lines.append(f"📊 <b>Açık Pozisyon Sayısı:</b> {open_count} / {len(SYMBOLS)}")
             lines.append("")
             lines.append("<b>📋 TÜM COİNLERİN DURUMU</b>")
-            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Coin Listesi Başlangıç Çizgisi
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")
             lines.extend(coin_status_lines)
-            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Coin Listesi Bitiş Çizgisi
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")
             lines.append("")
-            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Açık Pozisyonlar ile Genel Özet Arasındaki Çizgi
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")
             lines.append("<b>📊 GENEL ÖZET</b>")
             lines.append(f"💵 <b>Toplam Varlık:</b> {total_equity:.2f} USDT")
             lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (%{pnl_pct:+.2f})")
-            lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:+.2f} USDT")
+            lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:.2f} USDT")
 
             output_text = "\n".join(lines)
 
-            # Pozisyon açıldığında / kapandığında hemen bildir
+            # Pozisyon açıldığında veya kapandığında anında bildir
             if trade_events:
                 for event in trade_events:
                     send_telegram_msg(event)
-                last_telegram_time = time.time()  # İşlem olduğunda 14 dk sayacını sıfırla
+                last_telegram_time = time.time()
 
-            # İşlem olmazsa 14 dakikada bir tam detaylı rapor ver
+            # Her 1 dakikada bir (TELEGRAM_NOTIFY_INTERVAL) toplu durum raporu gönder
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
                 send_telegram_msg(output_text)
@@ -482,7 +471,7 @@ def main():
             break
         except Exception as e:
             print(f"Beklenmeyen döngü hatası: {e}")
-            time.sleep(15)
+            time.sleep(10)
 
 if __name__ == "__main__":
     main()
