@@ -54,7 +54,7 @@ COMMISSION_RATE = 0.0004
 STATE_FILE = "bot_state.json"
 REQUEST_TIMEOUT = 10
 RETRY_COUNT = 3
-TELEGRAM_NOTIFY_INTERVAL = 15 * 60
+TELEGRAM_NOTIFY_INTERVAL = 14 * 60  # 14 Dakika
 TURKEY_TZ = timezone(timedelta(hours=3))
 
 def now_date_text():
@@ -292,7 +292,7 @@ def main():
     )
     time.sleep(3)
 
-    last_telegram_time = 0
+    last_telegram_time = time.time()
 
     while True:
         try:
@@ -442,7 +442,9 @@ def main():
             lines.append(f"📊 <b>Açık Pozisyon Sayısı:</b> {open_count} / {len(SYMBOLS)}")
             lines.append("")
             lines.append("<b>📋 TÜM COİNLERİN DURUMU</b>")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Çizgi Başlangıcı
             lines.extend(coin_status_lines)
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Çizgi Bitişi
             
             lines.append("")
             lines.append("<b>📊 GENEL ÖZET</b>")
@@ -454,9 +456,13 @@ def main():
             
             print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
 
-            for event in trade_events:
-                send_telegram_msg(event)
+            # Pozisyon açıldığında / kapandığında hemen bildir
+            if trade_events:
+                for event in trade_events:
+                    send_telegram_msg(event)
+                last_telegram_time = time.time()  # İşlem olduğunda 14 dk sayacını sıfırla
 
+            # Hiç pozisyona girmezse / işlem olmazsa 14 dakikada bir genel durum raporu ver
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
                 send_telegram_msg(output_text)
