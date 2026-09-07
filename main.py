@@ -23,7 +23,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # ============================================================
 MEXC_BASE_URL = "https://contract.mexc.com/api/v1/contract/kline"
 
-# ==================== 10 COİN LİSTESİ ====================
+# ==================== 15 COİN LİSTESİ ====================
 SYMBOLS = {
     "BTC_USDT": "BTC",
     "ETH_USDT": "ETH",
@@ -35,6 +35,11 @@ SYMBOLS = {
     "AVAX_USDT": "AVAX",
     "LINK_USDT": "LINK",
     "NEAR_USDT": "NEAR",
+    "DOT_USDT": "DOT",
+    "UNI_USDT": "UNI",
+    "ATOM_USDT": "ATOM",
+    "LTC_USDT": "LTC",
+    "FET_USDT": "FET",
 }
 
 TIMEFRAME = "Min15"
@@ -233,7 +238,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"<html><body><h1>MEXC Bot Aktif - 10 Coin</h1></body></html>")
+        self.wfile.write(b"<html><body><h1>MEXC Bot Aktif - 15 Coin</h1></body></html>")
 
     def log_message(self, format, *args):
         return
@@ -283,11 +288,11 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print(f"MEXC Bot (10 Coin - Kâr Odaklı) başlatılıyor... Toplam coin: {len(SYMBOLS)}")
+    print(f"MEXC Bot (15 Coin - Kâr Odaklı) başlatılıyor... Toplam coin: {len(SYMBOLS)}")
     
     # Başlangıç bildirimi (Sadece ilk açılışta 1 kez)
     send_telegram_msg(
-        f"🚀 <b>MEXC BOT 10 COİN İLE BAŞLATILDI!</b>\n"
+        f"🚀 <b>MEXC BOT 15 COİN İLE BAŞLATILDI!</b>\n"
         f"🗓 <b>Tarih:</b> {now_date_text()}\n"
         f"Strateji: Trend + Breakout + Trailing\n"
         f"TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}"
@@ -437,7 +442,7 @@ def main():
             open_count = sum(1 for p in positions.values() if p is not None)
 
             lines = []
-            lines.append("🎯 <b>MEXC 10 COİN KELTNER + TREND BOTU</b>")
+            lines.append("🎯 <b>MEXC 15 COİN KELTNER + TREND BOTU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
             lines.append(f"⚙️ Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.0f} USDT")
             lines.append(f"🎯 TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}")
