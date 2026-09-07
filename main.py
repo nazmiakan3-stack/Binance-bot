@@ -285,19 +285,13 @@ def main():
 
     print(f"MEXC Bot (10 Coin - Kâr Odaklı) başlatılıyor... Toplam coin: {len(SYMBOLS)}")
     
-    # Başlangıçta 1 kez, çizgilerle birlikte coin listesini gönder
-    startup_coin_lines = [f"🟢 <b>{name}</b>" for name in SYMBOLS.values()]
-    startup_msg = (
+    # Başlangıç bildirimi (Sadece ilk açılışta 1 kez)
+    send_telegram_msg(
         f"🚀 <b>MEXC BOT 10 COİN İLE BAŞLATILDI!</b>\n"
         f"🗓 <b>Tarih:</b> {now_date_text()}\n"
         f"Strateji: Trend + Breakout + Trailing\n"
-        f"TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}\n\n"
-        f"<b>📋 TAKİP EDİLEN COİNLER</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n" +
-        "\n".join(startup_coin_lines) +
-        f"\n━━━━━━━━━━━━━━━━━━━━━"
+        f"TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}"
     )
-    send_telegram_msg(startup_msg)
     time.sleep(3)
 
     last_telegram_time = time.time()
@@ -306,6 +300,7 @@ def main():
         try:
             trade_events = []
             total_unrealized_pnl = 0.0
+            coin_status_lines = []
             
             with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
@@ -317,6 +312,7 @@ def main():
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
+                    coin_status_lines.append(f"⚪️ <b>{name}</b>: N/A | BOŞ | 💵 {wallet:.2f}$")
                     continue
 
                 pos = positions.get(symbol)
@@ -406,6 +402,7 @@ def main():
                         wallet_balances[symbol] += MARGIN_PER_TRADE + final_pnl
                         realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + final_pnl
                         positions[symbol] = None
+                        status_code = "KAPALI"
                         res_text = "TAKE PROFIT" if hit_tp else "STOP / TRAILING"
 
                         trade_events.append(
@@ -414,6 +411,24 @@ def main():
                             f"P/L: {final_pnl:+.2f} USDT\n"
                             f"Yeni Cüzdan: {wallet_balances[symbol]:.2f} USDT"
                         )
+                    else:
+                        status_code = "LONG" if side == "LONG" else "SHORT"
+
+                display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
+                
+                if status_code in ("LONG", "SHORT"):
+                    emoji = "🟢" if status_code == "LONG" else "🔴"
+                    pnl_yuzde = (unrealized_pnl / MARGIN_PER_TRADE) * 100
+                    coin_status_lines.append(
+                        f"{emoji} <b>{name}</b> | {status_code}\n"
+                        f"   Fiyat: {current_price} | Giriş: {pos['entry']:.6f}\n"
+                        f"   TP: {pos['tp']:.6f} | SL: {pos['sl']:.6f}\n"
+                        f"   K/Z: <b>{unrealized_pnl:+.2f}$ (%{pnl_yuzde:+.2f})</b> | Cüzdan: {display_wallet:.2f}$"
+                    )
+                else:
+                    coin_status_lines.append(
+                        f"⚪️ <b>{name}</b>: {current_price} | BOŞ | 💵 {display_wallet:.2f}$"
+                    )
 
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
@@ -428,6 +443,12 @@ def main():
             lines.append(f"🎯 TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}")
             lines.append(f"📊 <b>Açık Pozisyon Sayısı:</b> {open_count} / {len(SYMBOLS)}")
             lines.append("")
+            lines.append("<b>📋 TÜM COİNLERİN DURUMU</b>")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Coin Listesi Başlangıç Çizgisi
+            lines.extend(coin_status_lines)
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Coin Listesi Bitiş Çizgisi
+            lines.append("")
+            lines.append("━━━━━━━━━━━━━━━━━━━━━")  # Açık Pozisyonlar ile Genel Özet Arasındaki Çizgi
             lines.append("<b>📊 GENEL ÖZET</b>")
             lines.append(f"💵 <b>Toplam Varlık:</b> {total_equity:.2f} USDT")
             lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (%{pnl_pct:+.2f})")
@@ -441,7 +462,7 @@ def main():
                     send_telegram_msg(event)
                 last_telegram_time = time.time()  # İşlem olduğunda 14 dk sayacını sıfırla
 
-            # İşlem olmazsa 14 dakikada bir (listesiz) özet rapor ver
+            # İşlem olmazsa 14 dakikada bir tam detaylı rapor ver
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
                 send_telegram_msg(output_text)
