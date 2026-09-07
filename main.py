@@ -23,7 +23,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # ============================================================
 MEXC_BASE_URL = "https://contract.mexc.com/api/v1/contract/kline"
 
-# ==================== 70 COİN LİSTESİ ====================
+# ==================== 10 COİN LİSTESİ ====================
 SYMBOLS = {
     "BTC_USDT": "BTC",
     "ETH_USDT": "ETH",
@@ -34,67 +34,7 @@ SYMBOLS = {
     "ADA_USDT": "ADA",
     "AVAX_USDT": "AVAX",
     "LINK_USDT": "LINK",
-    "LTC_USDT": "LTC",
-    "DOT_USDT": "DOT",
-    "BCH_USDT": "BCH",
     "NEAR_USDT": "NEAR",
-    "APT_USDT": "APT",
-    "SUI_USDT": "SUI",
-    "ARB_USDT": "ARB",
-    "OP_USDT": "OP",
-    "ATOM_USDT": "ATOM",
-    "UNI_USDT": "UNI",
-    "AAVE_USDT": "AAVE",
-    "FIL_USDT": "FIL",
-    "ICP_USDT": "ICP",
-    "ETC_USDT": "ETC",
-    "XLM_USDT": "XLM",
-    "HBAR_USDT": "HBAR",
-    "VET_USDT": "VET",
-    "ALGO_USDT": "ALGO",
-    "FTM_USDT": "FTM",
-    "SAND_USDT": "SAND",
-    "MANA_USDT": "MANA",
-    "AXS_USDT": "AXS",
-    "GALA_USDT": "GALA",
-    "CHZ_USDT": "CHZ",
-    "ENJ_USDT": "ENJ",
-    "FLOW_USDT": "FLOW",
-    "THETA_USDT": "THETA",
-    "XTZ_USDT": "XTZ",
-    "EOS_USDT": "EOS",
-    "ZEC_USDT": "ZEC",
-    "DASH_USDT": "DASH",
-    "XMR_USDT": "XMR",
-    "KAS_USDT": "KAS",
-    "TON_USDT": "TON",
-    "TRX_USDT": "TRX",
-    "SHIB_USDT": "SHIB",
-    "PEPE_USDT": "PEPE",
-    "WIF_USDT": "WIF",
-    "BONK_USDT": "BONK",
-    "FLOKI_USDT": "FLOKI",
-    "INJ_USDT": "INJ",
-    "TIA_USDT": "TIA",
-    "SEI_USDT": "SEI",
-    "JUP_USDT": "JUP",
-    "WLD_USDT": "WLD",
-    "ONDO_USDT": "ONDO",
-    "ENA_USDT": "ENA",
-    "TAO_USDT": "TAO",
-    "RENDER_USDT": "RENDER",
-    "FET_USDT": "FET",
-    "CRV_USDT": "CRV",
-    "LDO_USDT": "LDO",
-    "PENDLE_USDT": "PENDLE",
-    "JTO_USDT": "JTO",
-    "PYTH_USDT": "PYTH",
-    "STRK_USDT": "STRK",
-    "BLUR_USDT": "BLUR",
-    "IMX_USDT": "IMX",
-    "STX_USDT": "STX",
-    "RUNE_USDT": "RUNE",
-    "CAKE_USDT": "CAKE",
 }
 
 TIMEFRAME = "Min15"
@@ -167,7 +107,6 @@ def send_telegram_msg(message, parse_mode="HTML"):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     
-    # Telegram 4096 karakter sınırını aşmamak için mesajları bölüyoruz
     if len(message) > 4000:
         parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
         success = True
@@ -238,47 +177,50 @@ def calc_rsi(closes, period=14):
     return 100 - (100 / (1 + rs))
 
 def analyze(symbol):
-    raw_data = get_klines(symbol)
-    if not raw_data or "close" not in raw_data:
+    try:
+        raw_data = get_klines(symbol)
+        if not raw_data or "close" not in raw_data:
+            return (symbol, None, None, None, None, None)
+
+        closes = [float(x) for x in raw_data["close"]]
+        highs = [float(x) for x in raw_data["high"]]
+        lows = [float(x) for x in raw_data["low"]]
+
+        if len(closes) < 60:
+            return (symbol, None, None, None, None, None)
+
+        closed_closes = closes[:-1]
+        closed_highs = highs[:-1]
+        closed_lows = lows[:-1]
+
+        price = closes[-1]
+        current_high = highs[-1]
+        current_low = lows[-1]
+
+        ema20 = calc_ema(closed_closes, 20)
+        ema50 = calc_ema(closed_closes, 50)
+        atr = calc_atr(closed_highs, closed_lows, closed_closes, 14)
+        rsi = calc_rsi(closed_closes, 14)
+
+        if not ema20 or not ema50 or atr == 0:
+            return (symbol, None, None, None, current_high, current_low)
+
+        kc_lower = ema20[-1] - atr * 1.8
+        kc_upper = ema20[-1] + atr * 1.8
+
+        atr_pct = atr / price
+        if atr_pct < 0.004 or atr_pct > 0.035:
+            return (symbol, None, price, rsi, current_high, current_low)
+
+        signal = None
+        if price > kc_upper and ema20[-1] > ema50[-1] and 45 <= rsi <= 70:
+            signal = "LONG"
+        elif price < kc_lower and ema20[-1] < ema50[-1] and 30 <= rsi <= 55:
+            signal = "SHORT"
+
+        return (symbol, signal, price, rsi, current_high, current_low)
+    except Exception:
         return (symbol, None, None, None, None, None)
-
-    closes = [float(x) for x in raw_data["close"]]
-    highs = [float(x) for x in raw_data["high"]]
-    lows = [float(x) for x in raw_data["low"]]
-
-    if len(closes) < 60:
-        return (symbol, None, None, None, None, None)
-
-    closed_closes = closes[:-1]
-    closed_highs = highs[:-1]
-    closed_lows = lows[:-1]
-
-    price = closes[-1]
-    current_high = highs[-1]
-    current_low = lows[-1]
-
-    ema20 = calc_ema(closed_closes, 20)
-    ema50 = calc_ema(closed_closes, 50)
-    atr = calc_atr(closed_highs, closed_lows, closed_closes, 14)
-    rsi = calc_rsi(closed_closes, 14)
-
-    if not ema20 or not ema50 or atr == 0:
-        return (symbol, None, None, None, current_high, current_low)
-
-    kc_lower = ema20[-1] - atr * 1.8
-    kc_upper = ema20[-1] + atr * 1.8
-
-    atr_pct = atr / price
-    if atr_pct < 0.004 or atr_pct > 0.035:
-        return (symbol, None, price, rsi, current_high, current_low)
-
-    signal = None
-    if price > kc_upper and ema20[-1] > ema50[-1] and 45 <= rsi <= 70:
-        signal = "LONG"
-    elif price < kc_lower and ema20[-1] < ema50[-1] and 30 <= rsi <= 55:
-        signal = "SHORT"
-
-    return (symbol, signal, price, rsi, current_high, current_low)
 
 # --- SUNUCU VE KEEP-ALIVE ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -291,18 +233,23 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
-        self.wfile.write(b"<html><body><h1>MEXC Bot Aktif - 70 Coin</h1></body></html>")
+        self.wfile.write(b"<html><body><h1>MEXC Bot Aktif - 10 Coin</h1></body></html>")
 
     def log_message(self, format, *args):
         return
 
 def run_health_check_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    server.serve_forever()
+    try:
+        port = int(os.getenv("PORT", 8080))
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        server.serve_forever()
+    except Exception as e:
+        print(f"Health Check Sunucu Hatasi: {e}")
 
 def self_ping():
-    url = os.getenv("RENDER_EXTERNAL_URL", "https://buraya-render-linkini-yaz.onrender.com")
+    url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if not url:
+        return
     while True:
         time.sleep(random.randint(600, 720))
         try:
@@ -336,9 +283,9 @@ def main():
         realized_pnl = {s: 0.0 for s in SYMBOLS}
         trade_number = 0
 
-    print(f"MEXC Bot (70 Coin - Kâr Odaklı) başlatılıyor... Toplam coin: {len(SYMBOLS)}")
+    print(f"MEXC Bot (10 Coin - Kâr Odaklı) başlatılıyor... Toplam coin: {len(SYMBOLS)}")
     send_telegram_msg(
-        f"🚀 <b>MEXC BOT 70 COİN İLE BAŞLATILDI!</b>\n"
+        f"🚀 <b>MEXC BOT 10 COİN İLE BAŞLATILDI!</b>\n"
         f"Tarih: {now_date_text()}\n"
         f"Strateji: Trend + Breakout + Trailing\n"
         f"TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}"
@@ -351,10 +298,9 @@ def main():
         try:
             trade_events = []
             total_unrealized_pnl = 0.0
-            
             coin_status_lines = []
             
-            with ThreadPoolExecutor(max_workers=10) as executor:
+            with ThreadPoolExecutor(max_workers=5) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
 
             analysis_dict = {r[0]: r[1:] for r in results}
@@ -468,7 +414,6 @@ def main():
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 
-                # === COİN LİSTELEME SATIRLARI (Alt alta ve detaylı) ===
                 if status_code in ("LONG", "SHORT"):
                     emoji = "🟢" if status_code == "LONG" else "🔴"
                     pnl_yuzde = (unrealized_pnl / MARGIN_PER_TRADE) * 100
@@ -483,7 +428,6 @@ def main():
                         f"⚪️ <b>{name}</b>: {current_price} | BOŞ | 💵 {display_wallet:.2f}$"
                     )
 
-            # === GENEL RAPOR OLUŞTURMA ===
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
             total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
@@ -491,7 +435,7 @@ def main():
             open_count = sum(1 for p in positions.values() if p is not None)
 
             lines = []
-            lines.append("🎯 <b>MEXC 70 COİN KELTNER + TREND BOTU</b>")
+            lines.append("🎯 <b>MEXC 10 COİN KELTNER + TREND BOTU</b>")
             lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
             lines.append(f"⚙️ Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.0f} USDT")
             lines.append(f"🎯 TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}")
@@ -508,14 +452,11 @@ def main():
 
             output_text = "\n".join(lines)
             
-            # Konsola yazdır (etiketleri temizleyerek)
             print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
 
-            # Yeni açılan/kapanan pozisyon bildirimlerini gönder
             for event in trade_events:
                 send_telegram_msg(event)
 
-            # Periyodik genel durum raporu (Telegram)
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
                 send_telegram_msg(output_text)
@@ -529,7 +470,7 @@ def main():
             save_state(positions, wallet_balances, realized_pnl, trade_number)
             break
         except Exception as e:
-            print(f"Hata oluştu: {e}")
+            print(f"Beklenmeyen döngü hatası: {e}")
             time.sleep(15)
 
 if __name__ == "__main__":
