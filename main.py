@@ -106,9 +106,9 @@ LEVERAGE = 10.0
 POSITION_SIZE = MARGIN_PER_TRADE * LEVERAGE
 
 # ===== KÂR ODAKLI AYARLAR =====
-TAKE_PROFIT_PCT = 0.035      # %3.5 TP
-STOP_LOSS_PCT = 0.018       # %1.8 SL
-TRAILING_TRIGGER = 0.020    # %2 kâr sonrası trailing
+TAKE_PROFIT_PCT = 0.035
+STOP_LOSS_PCT = 0.018
+TRAILING_TRIGGER = 0.020
 COMMISSION_RATE = 0.0004
 
 STATE_FILE = "bot_state.json"
@@ -254,14 +254,11 @@ def analyze(symbol):
     kc_lower = ema20[-1] - atr * 1.8
     kc_upper = ema20[-1] + atr * 1.8
 
-    # Volatilite filtresi
     atr_pct = atr / price
     if atr_pct < 0.004 or atr_pct > 0.035:
         return (symbol, None, price, rsi, current_high, current_low)
 
     signal = None
-
-    # Trend + Breakout stratejisi
     if price > kc_upper and ema20[-1] > ema50[-1] and 45 <= rsi <= 70:
         signal = "LONG"
     elif price < kc_lower and ema20[-1] < ema50[-1] and 30 <= rsi <= 55:
@@ -312,7 +309,6 @@ def main():
         realized_pnl = state.get("realized_pnl", {s: 0.0 for s in SYMBOLS})
         trade_number = state.get("trade_number", 0)
 
-        # Eksik coinleri ekle (70'e çıkınca eski state'te olmayanlar için)
         for s in SYMBOLS:
             if s not in positions:
                 positions[s] = None
@@ -342,13 +338,10 @@ def main():
             trade_events = []
             total_unrealized_pnl = 0.0
             
-            lines = []
-            lines.append("🎯 <b>10X KELTNER + TREND BOT (70 COİN)</b>")
-            lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
-            lines.append(f"⚙️ <b>Kaldıraç:</b> {LEVERAGE:.0f}x | <b>Teminat:</b> {MARGIN_PER_TRADE:.0f} USDT")
-            lines.append(f"🎯 TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}\n")
-            lines.append("<b>🪙 COIN DURUMLARI</b>")
-
+            # Rapor için listeler
+            open_positions_lines = []
+            empty_lines = []
+            
             with ThreadPoolExecutor(max_workers=10) as executor:
                 results = list(executor.map(analyze, SYMBOLS.keys()))
 
@@ -359,8 +352,7 @@ def main():
                 wallet = wallet_balances.get(symbol, STARTING_BALANCE_PER_COIN)
 
                 if current_price is None:
-                    lines.append(f"🔸 <b>{name}:</b> N/A")
-                    lines.append(f"└ ⚪️ BOŞ | 💵 {wallet:.2f}$ | 📈 +0.00$")
+                    empty_lines.append(f"🔸 <b>{name}</b>: N/A | ⚪️ BOŞ | 💵 {wallet:.2f}$")
                     continue
 
                 pos = positions.get(symbol)
@@ -398,12 +390,11 @@ def main():
                         f"TP: {tp:.6f} | SL: {sl:.6f}"
                     )
 
-                # Açık pozisyon yönetimi + Trailing Stop
+                # Açık pozisyon yönetimi + Trailing
                 if pos is not None:
                     side = pos["side"]
                     entry = float(pos["entry"])
                     
-                    # Trailing Stop
                     if side == "LONG":
                         current_pnl_pct = (current_price - entry) / entry
                         if current_pnl_pct >= TRAILING_TRIGGER and not pos.get("trailing_activated"):
@@ -452,7 +443,7 @@ def main():
                         realized_pnl[symbol] = realized_pnl.get(symbol, 0.0) + final_pnl
                         positions[symbol] = None
                         status_code = "KAPALI"
-                        res_text = "TAKE PROFIT (Kâr Al)" if hit_tp else "STOP LOSS / TRAILING"
+                        res_text = "TAKE PROFIT" if hit_tp else "STOP / TRAILING"
 
                         trade_events.append(
                             f"✅ <b>POZİSYON KAPANDI</b>\n"
@@ -465,43 +456,61 @@ def main():
 
                 display_wallet = wallet_balances[symbol] + (MARGIN_PER_TRADE + unrealized_pnl if positions.get(symbol) else 0)
                 
-                if status_code == "BOŞ": status_emoji = "⚪️ BOŞ"
-                elif status_code == "LONG": status_emoji = "🟢 LONG"
-                elif status_code == "SHORT": status_emoji = "🔴 SHORT"
-                elif status_code == "KAPALI": status_emoji = "✅ KAP"
-                
-                lines.append(f"🔸 <b>{name}:</b> {current_price}")
-                lines.append(f"└ {status_emoji} | 💵 {display_wallet:.2f}$ | 📈 {unrealized_pnl:+.2f}$")
+                # === RAPOR SATIRLARI (Alt alta sıralı) ===
+                if status_code in ("LONG", "SHORT"):
+                    emoji = "🟢" if status_code == "LONG" else "🔴"
+                    open_positions_lines.append(
+                        f"{emoji} <b>{name}</b> | {status_code}\n"
+                        f"   Fiyat: {current_price}\n"
+                        f"   Giriş: {pos['entry']:.6f}\n"
+                        f"   PNL: {unrealized_pnl:+.2f}$ | Cüzdan: {display_wallet:.2f}$"
+                    )
+                else:
+                    empty_lines.append(
+                        f"🔸 <b>{name}</b>: {current_price} | ⚪️ BOŞ | 💵 {display_wallet:.2f}$"
+                    )
 
+            # === RAPOR OLUŞTURMA ===
             total_cash = sum(wallet_balances.values())
             total_realized = sum(realized_pnl.values())
             total_equity = total_cash + sum(float(p["margin"]) for p in positions.values() if p) + total_unrealized_pnl
             pnl_pct = (total_unrealized_pnl / total_equity * 100) if total_equity > 0 else 0.0
+            open_count = len(open_positions_lines)
 
-            lines.append("\n<b>📊 GENEL ÖZET</b>")
+            lines = []
+            lines.append("🎯 <b>10X KELTNER + TREND BOT (70 COİN)</b>")
+            lines.append(f"🗓 <b>Tarih:</b> {now_date_text()}")
+            lines.append(f"⚙️ Kaldıraç: {LEVERAGE:.0f}x | Teminat: {MARGIN_PER_TRADE:.0f} USDT")
+            lines.append(f"🎯 TP: %{TAKE_PROFIT_PCT*100:.1f} | SL: %{STOP_LOSS_PCT*100:.1f}")
+            lines.append("")
+
+            # --- AÇIK POZİSYONLAR (Öncelikli ve alt alta) ---
+            lines.append(f"<b>📌 AÇIK POZİSYONLAR ({open_count} adet)</b>")
+            if open_positions_lines:
+                lines.extend(open_positions_lines)
+            else:
+                lines.append("   Şu an açık pozisyon yok.")
+            
+            lines.append("")
+            lines.append("<b>📊 GENEL ÖZET</b>")
             lines.append(f"💵 <b>Toplam Varlık:</b> {total_equity:.2f} USDT")
-            lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (<b>%{pnl_pct:+.2f}</b>)")
+            lines.append(f"📈 <b>Açık K/Z:</b> {total_unrealized_pnl:+.2f} USDT (%{pnl_pct:+.2f})")
             lines.append(f"💰 <b>Realize K/Z:</b> {total_realized:+.2f} USDT")
             lines.append(f"🔢 <b>Toplam Coin:</b> {len(SYMBOLS)}")
 
             output_text = "\n".join(lines)
+            
+            # Konsola yazdır
             print("\n" + output_text.replace('<b>', '').replace('</b>', ''))
 
+            # Trade event'leri gönder
             for event in trade_events:
                 send_telegram_msg(event)
 
+            # Periyodik rapor (Telegram)
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
-                # Telegram mesajı çok uzun olmasın diye sadece özeti gönder
-                summary = (
-                    f"🎯 <b>10X KELTNER + TREND BOT (70 COİN)</b>\n"
-                    f"🗓 {now_date_text()}\n"
-                    f"💵 Toplam Varlık: <b>{total_equity:.2f} USDT</b>\n"
-                    f"📈 Açık K/Z: {total_unrealized_pnl:+.2f} USDT\n"
-                    f"💰 Realize K/Z: {total_realized:+.2f} USDT\n"
-                    f"🔢 Aktif Pozisyon: {sum(1 for p in positions.values() if p)}"
-                )
-                send_telegram_msg(summary)
+                send_telegram_msg(output_text)
                 last_telegram_time = now_ts
 
             save_state(positions, wallet_balances, realized_pnl, trade_number)
