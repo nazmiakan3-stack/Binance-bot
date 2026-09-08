@@ -44,7 +44,7 @@ SYMBOLS = {
 
 TIMEFRAME = "Min15"
 LOOP_SECONDS = 10                  # Kontrol süresi: 10 saniye
-TELEGRAM_NOTIFY_INTERVAL = 60      # Rapor yayın aralığı: 1 dakika
+TELEGRAM_NOTIFY_INTERVAL = 15 * 60 # Rapor yayın aralığı: 15 dakika (900 saniye)
 
 STARTING_BALANCE_PER_COIN = 30.0
 MARGIN_PER_TRADE = 25.0
@@ -227,7 +227,6 @@ def analyze(symbol):
     except Exception:
         return (symbol, None, None, None, None, None)
 
-# --- SUNUCU VE KEEP-ALIVE ---
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
@@ -290,7 +289,6 @@ def main():
 
     print(f"MEXC Bot (15 Coin - Kâr Odaklı) başlatılıyor... Toplam coin: {len(SYMBOLS)}")
     
-    # İlk açılışta hemen ilk raporu atması için tetikliyoruz
     last_telegram_time = 0.0
 
     while True:
@@ -316,7 +314,6 @@ def main():
                 unrealized_pnl = 0.0
                 status_code = "BOŞ"
 
-                # Yeni pozisyon açma
                 if pos is None and signal in ("LONG", "SHORT") and wallet >= MARGIN_PER_TRADE:
                     trade_number += 1
                     if signal == "LONG":
@@ -347,7 +344,6 @@ def main():
                         f"TP: {tp:.6f} | SL: {sl:.6f}"
                     )
 
-                # Açık pozisyon yönetimi + Trailing
                 if pos is not None:
                     side = pos["side"]
                     entry = float(pos["entry"])
@@ -450,13 +446,11 @@ def main():
 
             output_text = "\n".join(lines)
 
-            # Pozisyon açıldığında veya kapandığında anında bildir
             if trade_events:
                 for event in trade_events:
                     send_telegram_msg(event)
                 last_telegram_time = time.time()
 
-            # Her 1 dakikada bir (TELEGRAM_NOTIFY_INTERVAL) toplu durum raporu gönder
             now_ts = time.time()
             if now_ts - last_telegram_time >= TELEGRAM_NOTIFY_INTERVAL:
                 send_telegram_msg(output_text)
