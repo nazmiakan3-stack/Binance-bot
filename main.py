@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Binance Futures 15m Multi-Coin Simulator v12.0
-- Risk bazlı pozisyon büyüklüğü (% risk)
-- Akıllı Trailing (önce BE, sonra ATR trail)
+Binance Futures 15m Multi-Coin Simulator v12.1
+- İlk çalıştığında Telegram başlangıç mesajı
+- Tüm sinyalleri toplayıp en iyi 10 tanesini seçer
+- Risk bazlı pozisyon büyüklüğü
+- Akıllı Trailing (Breakeven + ATR)
 - CSV işlem kaydı
-- Detaylı istatistik + portföy takibi
-- Gerçek emir YOK
+- Detaylı istatistik
+Gerçek emir YOK
 """
 
 import json
@@ -31,13 +33,14 @@ LIMIT = 200
 # --- Risk & Filtre ---
 SL_ATR_MULTIPLIER = 1.3
 TRAIL_ATR_MULTIPLIER = 1.6
-BREAKEVEN_R = 0.8                # +0.8R olunca SL'yi girişe çek
+BREAKEVEN_R = 0.8
 LEVERAGE = 10.0
-RISK_PERCENT = 1.5               # Her işlemde bakiyenin %1.5'ini riske at
+RISK_PERCENT = 1.5
 STARTING_BALANCE = 500.0
 MAX_OPEN_POSITIONS = 5
 MIN_QUOTE_VOLUME = 50_000_000
 MIN_SIGNAL_SCORE = 5
+TOP_SIGNALS = 10                  # En iyi kaç sinyali değerlendirecek
 
 REQUEST_TIMEOUT = 12
 RETRY_COUNT = 2
@@ -75,7 +78,7 @@ def send_telegram(message: str) -> bool:
     }).encode("utf-8")
     req = Request(url, data=payload, headers={
         "Content-Type": "application/json",
-        "User-Agent": "MultiCoinSimulator/12.0",
+        "User-Agent": "MultiCoinSimulator/12.1",
     }, method="POST")
     for attempt in range(1, RETRY_COUNT + 1):
         try:
@@ -92,7 +95,7 @@ def http_get_json(url: str):
     last_error = None
     for attempt in range(1, RETRY_COUNT + 1):
         try:
-            req = Request(url, headers={"User-Agent": "MultiCoinSimulator/12.0"})
+            req = Request(url, headers={"User-Agent": "MultiCoinSimulator/12.1"})
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return json.loads(response.read().decode("utf-8"))
         except Exception as e:
@@ -373,14 +376,10 @@ def analyze_15m(symbol: str):
 
 
 def calculate_position_size(balance: float, entry: float, sl: float, side: str) -> tuple:
-    """Risk bazlı pozisyon büyüklüğü hesaplar. (size, margin, risk_usdt)"""
     risk_usdt = balance * (RISK_PERCENT / 100)
     sl_distance = abs(entry - sl)
     if sl_distance <= 0:
         return 0, 0, 0
-
-    # Kayıp = size * (sl_distance / entry)
-    # risk_usdt = size * (sl_distance / entry)
     size = risk_usdt / (sl_distance / entry)
     margin = size / LEVERAGE
     return size, margin, risk_usdt
@@ -426,11 +425,11 @@ def print_stats(balance, peak_balance, closed_trades, positions, used_margin):
 
 def run_simulation():
     log.info("=" * 70)
-    log.info("   BINANCE FUTURES MULTI-COIN 15m SİMÜLATÖR v12.0")
-    log.info("   RISK BAZLI + AKILLI TRAILING + CSV KAYIT")
+    log.info("   BINANCE FUTURES MULTI-COIN 15m SİMÜLATÖR v12.1")
+    log.info("   EN İYİ 10 SİNYAL + BAŞLANGIÇ MESAJI + RISK BAZLI")
     log.info("   GERÇEK EMİR YOK")
     log.info(f"   Başlangıç: {STARTING_BALANCE} | Risk: %{RISK_PERCENT} | Max Poz: {MAX_OPEN_POSITIONS}")
-    log.info(f"   Min Skor: {MIN_SIGNAL_SCORE}/6 | Min Hacim: {MIN_QUOTE_VOLUME/1e6:.0f}M")
+    log.info(f"   Min Skor: {MIN_SIGNAL_SCORE}/6 | Min Hacim: {MIN_QUOTE_VOLUME/1e6:.0f}M | Top: {TOP_SIGNALS}")
     log.info("=" * 70)
 
     init_csv()
@@ -447,6 +446,22 @@ def run_simulation():
     if not all_symbols:
         log.error("Uygun sembol bulunamadı.")
         return
+
+    # ========== BAŞLANGIÇ TELEGRAM MESAJI ==========
+    startup_msg = (
+        f"🚀 Bot v12.1 Başlatıldı\n"
+        f"────────────────────\n"
+        f"Bakiye: {STARTING_BALANCE} USDT\n"
+        f"Risk: %{RISK_PERCENT}\n"
+        f"Max Pozisyon: {MAX_OPEN_POSITIONS}\n"
+        f"Min Skor: {MIN_SIGNAL_SCORE}/6\n"
+        f"Min Hacim: {MIN_QUOTE_VOLUME/1_000_000:.0f}M USDT\n"
+        f"Seçim: En iyi {TOP_SIGNALS} sinyal"
+    )
+    if send_telegram(startup_msg):
+        log.info("Başlangıç Telegram mesajı gönderildi.")
+    else:
+        log.warning("Başlangıç Telegram mesajı gönderilemedi.")
 
     balance = STARTING_BALANCE
     peak_balance = STARTING_BALANCE
@@ -472,8 +487,12 @@ def run_simulation():
             log.info("-" * 70)
             log.info(f"Döngü | Açık: {len(positions)}/{MAX_OPEN_POSITIONS} | Serbest: {balance - used_margin:.2f}")
 
-            scanned = signals_found = errors = 0
+            scanned = 0
+            signals_found = 0
+            errors = 0
+            candidates = []
 
+            # ---------- 1. Tüm sembolleri tara ----------
             for symbol in all_symbols:
                 try:
                     time.sleep(REQUEST_DELAY)
@@ -487,7 +506,7 @@ def run_simulation():
                     low = data["low"]
                     atr_val = data["atr"]
 
-                    # ===== Açık pozisyon yönetimi =====
+                    # Açık pozisyon yönetimi
                     if symbol in positions:
                         pos = positions[symbol]
                         if pos.get("just_opened"):
@@ -504,16 +523,14 @@ def run_simulation():
                         reason = ""
                         exit_price = None
 
-                        # --- Akıllı Trailing ---
+                        # Akıllı Trailing
                         r_distance = abs(entry - pos["initial_sl"])
                         if side == "LONG":
                             current_r = (price - entry) / r_distance if r_distance > 0 else 0
-                            # Breakeven
                             if current_r >= BREAKEVEN_R and sl < entry:
                                 pos["sl"] = entry
                                 sl = entry
-                                log.info(f"   #{pos['id']} {symbol} → Breakeven'e çekildi")
-                            # Trailing
+                                log.info(f"   #{pos['id']} {symbol} → Breakeven")
                             if atr_val:
                                 new_trail = price - atr_val * TRAIL_ATR_MULTIPLIER
                                 if new_trail > sl:
@@ -524,7 +541,7 @@ def run_simulation():
                             if current_r >= BREAKEVEN_R and sl > entry:
                                 pos["sl"] = entry
                                 sl = entry
-                                log.info(f"   #{pos['id']} {symbol} → Breakeven'e çekildi")
+                                log.info(f"   #{pos['id']} {symbol} → Breakeven")
                             if atr_val:
                                 new_trail = price + atr_val * TRAIL_ATR_MULTIPLIER
                                 if new_trail < sl:
@@ -590,60 +607,76 @@ def run_simulation():
                             del positions[symbol]
                         continue
 
-                    # ===== Yeni pozisyon =====
-                    signal = data["signal"]
-                    if signal in ("LONG", "SHORT"):
-                        if len(positions) >= MAX_OPEN_POSITIONS:
-                            continue
-
-                        sl = data["long_sl"] if signal == "LONG" else data["short_sl"]
-                        if sl is None:
-                            continue
-
-                        size, margin, risk_usdt = calculate_position_size(balance, price, sl, signal)
-                        if margin <= 0 or size <= 0:
-                            continue
-                        if (balance - used_margin) < margin:
-                            continue
-
-                        trade_number += 1
-                        positions[symbol] = {
-                            "id": trade_number,
-                            "symbol": symbol,
-                            "side": signal,
-                            "entry": price,
-                            "sl": sl,
-                            "initial_sl": sl,
-                            "size": size,
-                            "margin": margin,
-                            "risk_usdt": risk_usdt,
-                            "opened_at": now_text(),
-                            "just_opened": True,
-                        }
-                        used_margin += margin
-                        signals_found += 1
-
-                        log.info(
-                            f">>> AÇILDI #{trade_number} {symbol} {signal} | "
-                            f"Giriş: {price:.6f} | SL: {sl:.6f} | "
-                            f"Risk: {risk_usdt:.2f} USDT | Size: {size:.1f} | "
-                            f"Skor: {abs(data['score'])}/6 | {data['reasons']}"
-                        )
-
-                        send_telegram(
-                            f"🚀 YENİ #{trade_number}\n{symbol} {signal}\n"
-                            f"Giriş: {price:.6f}\nSL: {sl:.6f}\n"
-                            f"Risk: {risk_usdt:.2f} USDT\n"
-                            f"Skor: {abs(data['score'])}/6 | {data['reasons']}"
-                        )
+                    # Sinyal adayı topla
+                    if data["signal"] in ("LONG", "SHORT"):
+                        candidates.append((abs(data["score"]), symbol, data))
 
                 except Exception as e:
                     errors += 1
                     if errors <= 3 or errors % 20 == 0:
                         log.warning(f"{symbol} hata: {e}")
 
+            # ---------- 2. En iyi sinyalleri seç ve aç ----------
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            top_candidates = candidates[:TOP_SIGNALS]
+
+            log.info(f"Aday sinyal: {len(candidates)} | En iyi {len(top_candidates)} seçildi")
+
+            for score, symbol, data in top_candidates:
+                if len(positions) >= MAX_OPEN_POSITIONS:
+                    break
+                if symbol in positions:
+                    continue
+
+                free = balance - used_margin
+                if free < 10:
+                    break
+
+                signal = data["signal"]
+                price = data["price"]
+                sl = data["long_sl"] if signal == "LONG" else data["short_sl"]
+                if sl is None:
+                    continue
+
+                size, margin, risk_usdt = calculate_position_size(balance, price, sl, signal)
+                if margin <= 0 or size <= 0 or free < margin:
+                    continue
+
+                trade_number += 1
+                positions[symbol] = {
+                    "id": trade_number,
+                    "symbol": symbol,
+                    "side": signal,
+                    "entry": price,
+                    "sl": sl,
+                    "initial_sl": sl,
+                    "size": size,
+                    "margin": margin,
+                    "risk_usdt": risk_usdt,
+                    "opened_at": now_text(),
+                    "just_opened": True,
+                }
+                used_margin += margin
+                signals_found += 1
+
+                log.info(
+                    f">>> AÇILDI #{trade_number} {symbol} {signal} | "
+                    f"Skor: {score}/6 | Giriş: {price:.6f} | SL: {sl:.6f} | "
+                    f"Risk: {risk_usdt:.2f} | {data['reasons']}"
+                )
+
+                send_telegram(
+                    f"🚀 YENİ #{trade_number}\n"
+                    f"{symbol} {signal}\n"
+                    f"Skor: {score}/6\n"
+                    f"Giriş: {price:.6f}\n"
+                    f"SL: {sl:.6f}\n"
+                    f"Risk: {risk_usdt:.2f} USDT\n"
+                    f"{data['reasons']}"
+                )
+
             elapsed = time.time() - cycle_start
-            log.info(f"Tarama bitti | Taranan: {scanned} | Yeni: {signals_found} | Hata: {errors} | Süre: {elapsed:.1f}s")
+            log.info(f"Tarama bitti | Taranan: {scanned} | Yeni açılan: {signals_found} | Hata: {errors} | Süre: {elapsed:.1f}s")
 
             if time.time() - last_stats_print > STATS_INTERVAL:
                 print_stats(balance, peak_balance, closed_trades, positions, used_margin)
