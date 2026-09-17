@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Binance Futures 15m Multi-Coin Simulator
-Tüm USDT-M perpetual coinleri tarar (dinamik liste).
-Aynı sinyal mantığı (BB + StochRSI + KDJ + EMA + MACD + Hacim).
-Sanal bakiye: 500 USDT
-Her pozisyon: 10 USDT margin + 10x kaldıraç
+Binance Futures 15m Multi-Coin Simulator v10.0
+- Sadece yüksek hacimli USDT perpetual coinler
+- Sinyal eşiği yükseltildi (≥4/6)
+- Trend filtresi eklendi (EMA50/EMA200)
+- Max 8 açık pozisyon
+- Daha sağlıklı risk yönetimi
 Gerçek emir YOK.
 """
 
@@ -22,21 +23,25 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 BASE_URL = "https://fapi.binance.com/fapi/v1"
 EXCHANGE_INFO_URL = f"{BASE_URL}/exchangeInfo"
+TICKER_24H_URL = f"{BASE_URL}/ticker/24hr"
 KLINES_URL = f"{BASE_URL}/klines"
 
 INTERVAL = "15m"
-LIMIT = 200                    # 250 yerine 200 → daha hızlı tarama
+LIMIT = 200
 
 SL_ATR_MULTIPLIER = 1.2
 LEVERAGE = 10.0
-MARGIN_PER_TRADE = 10.0        # Her pozisyon için sabit 10 USDT margin
-STARTING_BALANCE = 500.0       # Toplam sanal bakiye
+MARGIN_PER_TRADE = 20.0          # 10 → 20 USDT
+STARTING_BALANCE = 500.0
+MAX_OPEN_POSITIONS = 8           # Aynı anda en fazla 8 pozisyon
+MIN_QUOTE_VOLUME = 30_000_000    # 24h hacim ≥ 30M USDT
+MIN_SIGNAL_SCORE = 4             # Eski 2 → yeni 4
 
 REQUEST_TIMEOUT = 12
 RETRY_COUNT = 2
 RETRY_DELAY = 2
-LOOP_SECONDS = 90              # Tam tarama uzun sürdüğü için biraz daha uzun bekle
-REQUEST_DELAY = 0.12           # Coinler arası istek gecikmesi (rate limit koruması)
+LOOP_SECONDS = 75
+REQUEST_DELAY = 0.08             # Biraz daha hızlı
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -45,10 +50,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler("bot.log", encoding="utf-8"),
+        logging.FileHandler("bot_v10.log", encoding="utf-8"),
     ],
 )
-log = logging.getLogger("metal-bot")
+log = logging.getLogger("multi-v10")
 
 
 def now_text() -> str:
@@ -57,7 +62,6 @@ def now_text() -> str:
 
 def send_telegram(message: str) -> bool:
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("Telegram token/chat_id tanımlı değil, mesaj gönderilmedi.")
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -72,7 +76,7 @@ def send_telegram(message: str) -> bool:
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "MultiCoinSimulator/9.9",
+            "User-Agent": "MultiCoinSimulator/10.0",
         },
         method="POST",
     )
@@ -92,7 +96,7 @@ def http_get_json(url: str):
     last_error = None
     for attempt in range(1, RETRY_COUNT + 1):
         try:
-            req = Request(url, headers={"User-Agent": "MultiCoinSimulator/9.9"})
+            req = Request(url, headers={"User-Agent": "MultiCoinSimulator/10.0"})
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return json.loads(response.read().decode("utf-8"))
         except Exception as e:
@@ -102,20 +106,36 @@ def http_get_json(url: str):
     raise RuntimeError(f"Binance bağlantısı başarısız: {last_error}")
 
 
-def get_all_usdt_perpetual_symbols() -> list:
-    """Tüm USDT-M perpetual trading sembollerini dinamik olarak çeker."""
-    data = http_get_json(EXCHANGE_INFO_URL)
-    symbols = []
-    for s in data.get("symbols", []):
+def get_high_volume_symbols() -> list:
+    """Sadece yüksek hacimli USDT perpetual sembolleri döndürür."""
+    # 1. ExchangeInfo ile geçerli perpetual listesini al
+    exchange = http_get_json(EXCHANGE_INFO_URL)
+    valid = set()
+    for s in exchange.get("symbols", []):
         if (
             s.get("quoteAsset") == "USDT"
             and s.get("contractType") == "PERPETUAL"
             and s.get("status") == "TRADING"
             and s.get("symbol", "").endswith("USDT")
         ):
-            symbols.append(s["symbol"])
+            valid.add(s["symbol"])
+
+    # 2. 24h ticker ile hacim filtresi uygula
+    tickers = http_get_json(TICKER_24H_URL)
+    symbols = []
+    for t in tickers:
+        sym = t.get("symbol")
+        if sym not in valid:
+            continue
+        try:
+            quote_vol = float(t.get("quoteVolume", 0))
+            if quote_vol >= MIN_QUOTE_VOLUME:
+                symbols.append(sym)
+        except (TypeError, ValueError):
+            continue
+
     symbols.sort()
-    log.info(f"Toplam {len(symbols)} USDT perpetual sembol bulundu.")
+    log.info(f"Yüksek hacimli sembol sayısı: {len(symbols)} (min {MIN_QUOTE_VOLUME/1_000_000:.0f}M USDT)")
     return symbols
 
 
@@ -273,9 +293,8 @@ def atr(data, period=14):
 
 
 def analyze_15m(symbol: str):
-    """Aynı orijinal sinyal mantığı – hiç bozulmadı."""
     data = get_klines(symbol, INTERVAL)
-    if len(data) < 150:
+    if len(data) < 160:
         return None
 
     closed_data = data[:-1]
@@ -289,12 +308,16 @@ def analyze_15m(symbol: str):
     kdj_k, kdj_d, _ = kdj_series(closes, highs, lows)
     ema5_series = ema_series(closes, 5)
     ema20_series = ema_series(closes, 20)
+    ema50_series = ema_series(closes, 50)
+    ema200_series = ema_series(closes, 200)
     macd_line, macd_sig = macd_series(closes)
     vol_ma20 = sma(volumes, 20)
     atr14 = atr(closed_data, 14)
     bb_upper, bb_mid, bb_lower = bollinger_bands(closes, 20, 2)
 
     if not (stoch_k and kdj_k and ema5_series and macd_line and atr14 and bb_upper):
+        return None
+    if not ema50_series or not ema200_series:
         return None
 
     sk_curr, sk_prev = stoch_k[-1], stoch_k[-2]
@@ -305,35 +328,39 @@ def analyze_15m(symbol: str):
 
     e5_curr, e5_prev = ema5_series[-1], ema5_series[-2]
     e20_curr = ema20_series[-1]
+    e50_curr = ema50_series[-1]
+    e200_curr = ema200_series[-1]
 
     m_curr, m_prev = macd_line[-1], macd_line[-2]
     ms_curr, ms_prev = macd_sig[-1], macd_sig[-2]
 
     curr_vol = volumes[-1]
 
-    # --- LONG koşulları (orijinal mantık) ---
+    # --- LONG koşulları ---
     c_bb_long = low <= bb_lower or price <= bb_lower * 1.002
     c_stoch_long = sk_curr > sd_curr or (sk_prev < 30 and sk_curr > sk_prev)
     c_kdj_long = kk_curr > kd_curr or (kk_prev < 30 and kk_curr > kk_prev)
     c_ema_long = e5_curr > e5_prev or price > e20_curr
     c_macd_long = m_curr > ms_curr or m_curr > m_prev
     c_vol_long = vol_ma20 is not None and (curr_vol > vol_ma20 * 0.8)
+    c_trend_long = e50_curr > e200_curr          # YENİ: Trend filtresi
 
     long_conditions = [c_bb_long, c_stoch_long, c_kdj_long, c_ema_long, c_macd_long, c_vol_long]
     long_score = sum(long_conditions)
 
-    # --- SHORT koşulları (orijinal mantık) ---
+    # --- SHORT koşulları ---
     c_bb_short = high >= bb_upper or price >= bb_upper * 0.998
     c_stoch_short = sk_curr < sd_curr or (sk_prev > 70 and sk_curr < sk_prev)
     c_kdj_short = kk_curr < kd_curr or (kk_prev > 70 and kk_curr < kk_prev)
     c_ema_short = e5_curr < e5_prev or price < e20_curr
     c_macd_short = m_curr < ms_curr or m_curr < m_prev
     c_vol_short = vol_ma20 is not None and (curr_vol > vol_ma20 * 0.8)
+    c_trend_short = e50_curr < e200_curr         # YENİ: Trend filtresi
 
     short_conditions = [c_bb_short, c_stoch_short, c_kdj_short, c_ema_short, c_macd_short, c_vol_short]
     short_score = sum(short_conditions)
 
-    # --- Çıkış sinyalleri (orijinal mantık) ---
+    # --- Çıkış sinyalleri ---
     long_exit_signal = (sk_curr < sd_curr and sk_curr > 75) or (e5_curr < e5_prev and price < e5_curr)
     short_exit_signal = (sk_curr > sd_curr and sk_curr < 25) or (e5_curr > e5_prev and price > e5_curr)
 
@@ -341,37 +368,28 @@ def analyze_15m(symbol: str):
     score = 0
     reasons = []
 
-    if long_score >= 2 and long_score > short_score:
+    # Sadece skor ≥ MIN_SIGNAL_SCORE ve trend uyumluysa sinyal ver
+    if long_score >= MIN_SIGNAL_SCORE and long_score > short_score and c_trend_long:
         signal = "LONG"
         score = long_score
-        if c_bb_long:
-            reasons.append("BB Alt Bant Temas")
-        if c_stoch_long:
-            reasons.append("StochRSI Dönüşü")
-        if c_kdj_long:
-            reasons.append("KDJ Dip Kesişimi")
-        if c_ema_long:
-            reasons.append("EMA5/EMA20 Trend")
-        if c_macd_long:
-            reasons.append("MACD Momentum")
-        if c_vol_long:
-            reasons.append("Hacim Desteği")
+        if c_bb_long: reasons.append("BB Alt")
+        if c_stoch_long: reasons.append("StochRSI")
+        if c_kdj_long: reasons.append("KDJ")
+        if c_ema_long: reasons.append("EMA5/20")
+        if c_macd_long: reasons.append("MACD")
+        if c_vol_long: reasons.append("Hacim")
+        reasons.append("Trend↑")
 
-    elif short_score >= 2 and short_score > long_score:
+    elif short_score >= MIN_SIGNAL_SCORE and short_score > long_score and c_trend_short:
         signal = "SHORT"
         score = -short_score
-        if c_bb_short:
-            reasons.append("BB Üst Bant Temas")
-        if c_stoch_short:
-            reasons.append("StochRSI Tepe Dönüşü")
-        if c_kdj_short:
-            reasons.append("KDJ Tepe Kesişimi")
-        if c_ema_short:
-            reasons.append("EMA5/EMA20 Trend")
-        if c_macd_short:
-            reasons.append("MACD Momentum")
-        if c_vol_short:
-            reasons.append("Hacim Desteği")
+        if c_bb_short: reasons.append("BB Üst")
+        if c_stoch_short: reasons.append("StochRSI")
+        if c_kdj_short: reasons.append("KDJ")
+        if c_ema_short: reasons.append("EMA5/20")
+        if c_macd_short: reasons.append("MACD")
+        if c_vol_short: reasons.append("Hacim")
+        reasons.append("Trend↓")
 
     long_sl = short_sl = None
     if atr14:
@@ -396,37 +414,51 @@ def analyze_15m(symbol: str):
 
 def run_simulation():
     log.info("=" * 70)
-    log.info("   BINANCE FUTURES MULTI-COIN 15m SİMÜLATÖR v9.9")
-    log.info("   TÜM USDT PERPETUAL COİNLER TARANIR")
+    log.info("   BINANCE FUTURES MULTI-COIN 15m SİMÜLATÖR v10.0")
+    log.info("   YÜKSEK HACİMLİ COİNLER + SIKI FİLTRELER")
     log.info("   GERÇEK EMİR YOK / API ANAHTARI YOK")
-    log.info(f"   Sanal Bakiye: {STARTING_BALANCE} USDT | Margin/Pozisyon: {MARGIN_PER_TRADE} USDT")
+    log.info(f"   Bakiye: {STARTING_BALANCE} | Margin: {MARGIN_PER_TRADE} | Max Poz: {MAX_OPEN_POSITIONS}")
+    log.info(f"   Min Skor: {MIN_SIGNAL_SCORE}/6 | Min Hacim: {MIN_QUOTE_VOLUME/1e6:.0f}M USDT")
     log.info("=" * 70)
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log.warning("TELEGRAM_BOT_TOKEN veya TELEGRAM_CHAT_ID tanımlı değil!")
-        log.warning("Bildirimler çalışmayacak. .env dosyasını kontrol et.")
+        log.warning("Telegram token/chat_id tanımlı değil → bildirimler kapalı.")
 
-    # Tüm sembolleri bir kez çek
     try:
-        all_symbols = get_all_usdt_perpetual_symbols()
+        all_symbols = get_high_volume_symbols()
     except Exception as e:
         log.error(f"Sembol listesi alınamadı: {e}")
         return
 
     if not all_symbols:
-        log.error("Hiç sembol bulunamadı, çıkılıyor.")
+        log.error("Hiç uygun sembol bulunamadı.")
         return
 
     balance = STARTING_BALANCE
     used_margin = 0.0
-    positions = {}          # symbol → position dict
+    positions = {}
     trade_number = 0
+
+    # Sembol listesini her 6 saatte bir yenile
+    last_symbol_refresh = time.time()
+    SYMBOL_REFRESH_SECONDS = 6 * 3600
 
     while True:
         try:
+            # Sembol listesini periyodik yenile
+            if time.time() - last_symbol_refresh > SYMBOL_REFRESH_SECONDS:
+                try:
+                    all_symbols = get_high_volume_symbols()
+                    last_symbol_refresh = time.time()
+                except Exception as e:
+                    log.warning(f"Sembol yenileme başarısız: {e}")
+
             cycle_start = time.time()
             log.info("-" * 70)
-            log.info(f"Döngü başladı: {now_text()} | Açık pozisyon: {len(positions)} | Serbest bakiye: {balance - used_margin:.2f} USDT")
+            log.info(
+                f"Döngü: {now_text()} | Açık: {len(positions)}/{MAX_OPEN_POSITIONS} | "
+                f"Serbest: {balance - used_margin:.2f} USDT"
+            )
 
             scanned = 0
             signals_found = 0
@@ -434,9 +466,7 @@ def run_simulation():
 
             for symbol in all_symbols:
                 try:
-                    # Rate limit koruması
                     time.sleep(REQUEST_DELAY)
-
                     data = analyze_15m(symbol)
                     scanned += 1
 
@@ -508,13 +538,16 @@ def run_simulation():
                             )
                             del positions[symbol]
 
-                        continue  # Pozisyon varken yeni sinyal arama
+                        continue
 
                     # --- Yeni pozisyon açma ---
                     if signal in ("LONG", "SHORT"):
+                        if len(positions) >= MAX_OPEN_POSITIONS:
+                            continue
+
                         free_balance = balance - used_margin
                         if free_balance < MARGIN_PER_TRADE:
-                            continue  # Yeterli serbest bakiye yok
+                            continue
 
                         sl = data["long_sl"] if signal == "LONG" else data["short_sl"]
                         if sl is None:
@@ -522,7 +555,7 @@ def run_simulation():
 
                         trade_number += 1
                         margin = MARGIN_PER_TRADE
-                        size = margin * LEVERAGE          # 10 * 10 = 100 USDT notional
+                        size = margin * LEVERAGE
 
                         positions[symbol] = {
                             "id": trade_number,
@@ -541,7 +574,7 @@ def run_simulation():
 
                         log.info(
                             f">>> AÇILDI #{trade_number} {symbol} | {signal} | "
-                            f"Giriş: {price:.6f} | SL: {sl:.6f} | Margin: {margin} USDT"
+                            f"Giriş: {price:.6f} | SL: {sl:.6f} | Skor: {abs(data['score'])}/6"
                         )
 
                         send_telegram(
@@ -551,30 +584,27 @@ def run_simulation():
                             f"Giriş: {price:.6f}\n"
                             f"SL: {sl:.6f}\n"
                             f"Margin: {margin} USDT | Notional: {size} USDT\n"
-                            f"Skor: {data['score']} | {data['reasons']}"
+                            f"Skor: {abs(data['score'])}/6 | {data['reasons']}"
                         )
 
                 except Exception as e:
                     errors += 1
-                    # Çok fazla log basmamak için sadece kritik hataları yaz
-                    if errors <= 5 or errors % 50 == 0:
+                    if errors <= 5 or errors % 30 == 0:
                         log.warning(f"{symbol} hata: {e}")
 
             elapsed = time.time() - cycle_start
             free = balance - used_margin
             log.info(
                 f"Tarama bitti | Taranan: {scanned}/{len(all_symbols)} | "
-                f"Yeni sinyal: {signals_found} | Hata: {errors} | "
-                f"Süre: {elapsed:.1f}s"
+                f"Yeni sinyal: {signals_found} | Hata: {errors} | Süre: {elapsed:.1f}s"
             )
             log.info(
-                f"📊 PORTFÖY → Bakiye: {balance:.2f} | Kullanılan Margin: {used_margin:.2f} | "
-                f"Serbest: {free:.2f} | Açık Pozisyon: {len(positions)}"
+                f"📊 PORTFÖY → Bakiye: {balance:.2f} | Kullanılan: {used_margin:.2f} | "
+                f"Serbest: {free:.2f} | Açık: {len(positions)}"
             )
 
-            # Bir sonraki döngüye kadar bekle
-            sleep_time = max(10, LOOP_SECONDS - elapsed)
-            log.info(f"Sonraki tarama için {sleep_time:.0f} saniye bekleniyor...")
+            sleep_time = max(15, LOOP_SECONDS - elapsed)
+            log.info(f"Sonraki tarama için {sleep_time:.0f} sn bekleniyor...")
             time.sleep(sleep_time)
 
         except KeyboardInterrupt:
