@@ -1,1 +1,3 @@
-requests
+# Bu bot Python standart kütüphanesini kullanır.
+# Ek paket gerekmez.
+# Python 3.8+ yeterlidir.
