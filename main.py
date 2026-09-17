@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Binance Futures 15m Multi-Coin Simulator v12.1
-- İlk çalıştığında Telegram başlangıç mesajı
-- Tüm sinyalleri toplayıp en iyi 10 tanesini seçer
-- Risk bazlı pozisyon büyüklüğü
-- Akıllı Trailing (Breakeven + ATR)
-- CSV işlem kaydı
-- Detaylı istatistik
+Binance Futures 15m Multi-Coin Simulator v12.4
+- Hacim ≥ 30M + ADX ≥ 22 + Skor ≥ 5
+- Saatlik detaylı Telegram raporu (coin bazlı kar/zarar tablosu)
+- CSV kayıt + Detaylı istatistik
+- Risk bazlı + Akıllı Trailing
 Gerçek emir YOK
 """
 
@@ -16,6 +14,7 @@ import time
 import logging
 import csv
 from datetime import datetime
+from collections import defaultdict
 from urllib.request import Request, urlopen
 
 # ==================== YAPILANDIRMA ====================
@@ -30,7 +29,6 @@ KLINES_URL = f"{BASE_URL}/klines"
 INTERVAL = "15m"
 LIMIT = 200
 
-# --- Risk & Filtre ---
 SL_ATR_MULTIPLIER = 1.3
 TRAIL_ATR_MULTIPLIER = 1.6
 BREAKEVEN_R = 0.8
@@ -38,9 +36,9 @@ LEVERAGE = 10.0
 RISK_PERCENT = 1.5
 STARTING_BALANCE = 500.0
 MAX_OPEN_POSITIONS = 5
-MIN_QUOTE_VOLUME = 50_000_000
+MIN_QUOTE_VOLUME = 30_000_000
 MIN_SIGNAL_SCORE = 5
-TOP_SIGNALS = 10                  # En iyi kaç sinyali değerlendirecek
+MIN_ADX = 22
 
 REQUEST_TIMEOUT = 12
 RETRY_COUNT = 2
@@ -49,6 +47,7 @@ LOOP_SECONDS = 80
 REQUEST_DELAY = 0.07
 
 CSV_FILE = "trades_v12.csv"
+HOURLY_REPORT_SECONDS = 3600          # 1 saat
 
 # ==================== LOGGING ====================
 logging.basicConfig(
@@ -75,10 +74,11 @@ def send_telegram(message: str) -> bool:
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "disable_web_page_preview": True,
+        "parse_mode": "HTML"
     }).encode("utf-8")
     req = Request(url, data=payload, headers={
         "Content-Type": "application/json",
-        "User-Agent": "MultiCoinSimulator/12.1",
+        "User-Agent": "MultiCoinSimulator/12.4",
     }, method="POST")
     for attempt in range(1, RETRY_COUNT + 1):
         try:
@@ -95,7 +95,7 @@ def http_get_json(url: str):
     last_error = None
     for attempt in range(1, RETRY_COUNT + 1):
         try:
-            req = Request(url, headers={"User-Agent": "MultiCoinSimulator/12.1"})
+            req = Request(url, headers={"User-Agent": "MultiCoinSimulator/12.4"})
             with urlopen(req, timeout=REQUEST_TIMEOUT) as response:
                 return json.loads(response.read().decode("utf-8"))
         except Exception as e:
@@ -272,6 +272,53 @@ def atr(data, period=14):
     return result
 
 
+def calculate_adx(highs, lows, closes, period=14):
+    if len(closes) < period * 2:
+        return None
+
+    tr_list, plus_dm, minus_dm = [], [], []
+
+    for i in range(1, len(closes)):
+        h, l = highs[i], lows[i]
+        prev_h, prev_l, prev_c = highs[i-1], lows[i-1], closes[i-1]
+
+        tr = max(h - l, abs(h - prev_c), abs(l - prev_c))
+        tr_list.append(tr)
+
+        up_move = h - prev_h
+        down_move = prev_l - l
+        plus_dm.append(up_move if up_move > down_move and up_move > 0 else 0)
+        minus_dm.append(down_move if down_move > up_move and down_move > 0 else 0)
+
+    def wilder_smooth(data, period):
+        smoothed = [sum(data[:period])]
+        for i in range(period, len(data)):
+            smoothed.append(smoothed[-1] - (smoothed[-1] / period) + data[i])
+        return smoothed
+
+    atr_s = wilder_smooth(tr_list, period)
+    plus_dm_s = wilder_smooth(plus_dm, period)
+    minus_dm_s = wilder_smooth(minus_dm, period)
+
+    dx_list = []
+    for i in range(len(atr_s)):
+        if atr_s[i] == 0:
+            dx_list.append(0)
+            continue
+        plus_di = 100 * plus_dm_s[i] / atr_s[i]
+        minus_di = 100 * minus_dm_s[i] / atr_s[i]
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) != 0 else 0
+        dx_list.append(dx)
+
+    if len(dx_list) < period:
+        return None
+
+    adx = sum(dx_list[:period]) / period
+    for i in range(period, len(dx_list)):
+        adx = ((adx * (period - 1)) + dx_list[i]) / period
+    return adx
+
+
 def analyze_15m(symbol: str):
     data = get_klines(symbol, INTERVAL)
     if len(data) < 180:
@@ -293,14 +340,17 @@ def analyze_15m(symbol: str):
     macd_line, macd_sig = macd_series(closes)
     vol_ma20 = sma(volumes, 20)
     atr14 = atr(closed_data, 14)
-    bb_upper, bb_mid, bb_lower = bollinger_bands(closes, 20, 2)
+    bb_upper, _, bb_lower = bollinger_bands(closes, 20, 2)
+    adx_val = calculate_adx(highs, lows, closes, 14)
 
-    if not all([stoch_k, kdj_k, ema5, ema20, ema50, ema200, macd_line, atr14, bb_upper]):
+    if not all([stoch_k, kdj_k, ema5, ema20, ema50, ema200, macd_line, atr14, bb_upper, adx_val]):
+        return None
+    if adx_val < MIN_ADX:
         return None
 
-    sk_c, sk_p = stoch_k[-1], stoch_k[-2]
+    sk_c = stoch_k[-1]
     sd_c = stoch_d[-1]
-    kk_c, kk_p = kdj_k[-1], kdj_k[-2]
+    kk_c = kdj_k[-1]
     kd_c = kdj_d[-1]
     e5_c, e5_p = ema5[-1], ema5[-2]
     e20_c = ema20[-1]
@@ -311,13 +361,13 @@ def analyze_15m(symbol: str):
     curr_vol = volumes[-1]
 
     # LONG
-    c_bb_long     = price <= bb_lower * 1.003 or low <= bb_lower
-    c_stoch_long  = sk_c > sd_c and sk_c < 45
-    c_kdj_long    = kk_c > kd_c and kk_c < 50
-    c_ema_long    = e5_c > e5_p and price > e20_c
-    c_macd_long   = m_c > ms_c and m_c > m_p
-    c_vol_long    = vol_ma20 and curr_vol > vol_ma20 * 1.1
-    c_trend_long  = e50_c > e200_c and price > e50_c
+    c_bb_long    = price <= bb_lower * 1.003 or low <= bb_lower
+    c_stoch_long = sk_c > sd_c and sk_c < 45
+    c_kdj_long   = kk_c > kd_c and kk_c < 50
+    c_ema_long   = e5_c > e5_p and price > e20_c
+    c_macd_long  = m_c > ms_c and m_c > m_p
+    c_vol_long   = vol_ma20 and curr_vol > vol_ma20 * 1.1
+    c_trend_long = e50_c > e200_c and price > e50_c
 
     long_conds = [c_bb_long, c_stoch_long, c_kdj_long, c_ema_long, c_macd_long, c_vol_long]
     long_score = sum(long_conds)
@@ -347,6 +397,7 @@ def analyze_15m(symbol: str):
         for name, cond in [("BB", c_bb_long), ("Stoch", c_stoch_long), ("KDJ", c_kdj_long),
                            ("EMA", c_ema_long), ("MACD", c_macd_long), ("Vol", c_vol_long)]:
             if cond: reasons.append(name)
+        reasons.append(f"ADX:{adx_val:.1f}")
         reasons.append("Trend↑")
 
     elif short_score >= MIN_SIGNAL_SCORE and short_score > long_score and c_trend_short:
@@ -355,6 +406,7 @@ def analyze_15m(symbol: str):
         for name, cond in [("BB", c_bb_short), ("Stoch", c_stoch_short), ("KDJ", c_kdj_short),
                            ("EMA", c_ema_short), ("MACD", c_macd_short), ("Vol", c_vol_short)]:
             if cond: reasons.append(name)
+        reasons.append(f"ADX:{adx_val:.1f}")
         reasons.append("Trend↓")
 
     long_sl = price - atr14 * SL_ATR_MULTIPLIER if atr14 else None
@@ -368,6 +420,7 @@ def analyze_15m(symbol: str):
         "long_sl": long_sl,
         "short_sl": short_sl,
         "atr": atr14,
+        "adx": adx_val,
         "long_exit_signal": long_exit,
         "short_exit_signal": short_exit,
         "score": score,
@@ -383,6 +436,82 @@ def calculate_position_size(balance: float, entry: float, sl: float, side: str) 
     size = risk_usdt / (sl_distance / entry)
     margin = size / LEVERAGE
     return size, margin, risk_usdt
+
+
+def build_coin_pnl_table(closed_trades: list) -> str:
+    """Coin bazında kar/zarar tablosu oluşturur"""
+    if not closed_trades:
+        return "Henüz kapanmış işlem yok."
+
+    coin_stats = defaultdict(lambda: {"pnl": 0.0, "count": 0, "wins": 0})
+
+    for t in closed_trades:
+        sym = t["symbol"]
+        coin_stats[sym]["pnl"] += t["pnl"]
+        coin_stats[sym]["count"] += 1
+        if t["pnl"] > 0:
+            coin_stats[sym]["wins"] += 1
+
+    # PnL'e göre sırala (yüksekten düşüğe)
+    sorted_coins = sorted(coin_stats.items(), key=lambda x: x[1]["pnl"], reverse=True)
+
+    lines = ["<b>Coin Bazlı Performans</b>"]
+    lines.append("────────────────────")
+    for sym, stat in sorted_coins:
+        winrate = (stat["wins"] / stat["count"] * 100) if stat["count"] > 0 else 0
+        emoji = "🟢" if stat["pnl"] > 0 else "🔴" if stat["pnl"] < 0 else "⚪"
+        lines.append(
+            f"{emoji} <b>{sym}</b>\n"
+            f"   K/Z: {stat['pnl']:+.2f} USDT | İşlem: {stat['count']} | WR: {winrate:.0f}%"
+        )
+    return "\n".join(lines)
+
+
+def generate_hourly_report(balance, peak_balance, closed_trades, positions, used_margin) -> str:
+    total = len(closed_trades)
+    if total == 0:
+        winrate = total_pnl = avg_pnl = best = worst = 0.0
+        wins = 0
+    else:
+        wins = sum(1 for t in closed_trades if t["pnl"] > 0)
+        winrate = wins / total * 100
+        total_pnl = sum(t["pnl"] for t in closed_trades)
+        avg_pnl = total_pnl / total
+        best = max(t["pnl"] for t in closed_trades)
+        worst = min(t["pnl"] for t in closed_trades)
+
+    drawdown = (peak_balance - balance) / peak_balance * 100 if peak_balance > 0 else 0
+    free = balance - used_margin
+    net_pnl = balance - STARTING_BALANCE
+
+    report = []
+    report.append("<b>📊 SAATLİK RAPOR</b>")
+    report.append(f"🕐 {now_text()}")
+    report.append("────────────────────")
+    report.append(f"<b>Portföy</b>")
+    report.append(f"Bakiye: <b>{balance:.2f}</b> USDT")
+    report.append(f"Net K/Z: <b>{net_pnl:+.2f}</b> USDT")
+    report.append(f"Kullanılan: {used_margin:.2f} | Serbest: {free:.2f}")
+    report.append(f"Peak: {peak_balance:.2f} | DD: {drawdown:.2f}%")
+    report.append(f"Açık Pozisyon: {len(positions)}/{MAX_OPEN_POSITIONS}")
+    report.append("────────────────────")
+    report.append(f"<b>İstatistik</b>")
+    report.append(f"Toplam İşlem: {total}")
+    report.append(f"Winrate: <b>{winrate:.1f}%</b> ({wins}/{total})")
+    report.append(f"Toplam K/Z: <b>{total_pnl:+.2f}</b> USDT")
+    report.append(f"Ortalama: {avg_pnl:+.2f} | En İyi: {best:+.2f} | En Kötü: {worst:+.2f}")
+    report.append("────────────────────")
+    report.append(build_coin_pnl_table(closed_trades))
+
+    if positions:
+        report.append("────────────────────")
+        report.append("<b>Açık Pozisyonlar</b>")
+        for sym, pos in positions.items():
+            report.append(
+                f"#{pos['id']} {sym} {pos['side']} | Giriş: {pos['entry']:.5f} | SL: {pos['sl']:.5f}"
+            )
+
+    return "\n".join(report)
 
 
 def print_stats(balance, peak_balance, closed_trades, positions, used_margin):
@@ -420,16 +549,16 @@ def print_stats(balance, peak_balance, closed_trades, positions, used_margin):
     if positions:
         log.info("📌 AÇIK POZİSYONLAR:")
         for sym, pos in positions.items():
-            log.info(f"   #{pos['id']} {sym} {pos['side']} | Giriş: {pos['entry']:.6f} | SL: {pos['sl']:.6f} | Risk: {pos.get('risk_usdt',0):.2f}")
+            log.info(f"   #{pos['id']} {sym} {pos['side']} | Giriş: {pos['entry']:.6f} | SL: {pos['sl']:.6f}")
 
 
 def run_simulation():
     log.info("=" * 70)
-    log.info("   BINANCE FUTURES MULTI-COIN 15m SİMÜLATÖR v12.1")
-    log.info("   EN İYİ 10 SİNYAL + BAŞLANGIÇ MESAJI + RISK BAZLI")
+    log.info("   BINANCE FUTURES MULTI-COIN 15m SİMÜLATÖR v12.4")
+    log.info("   SAATLİK RAPOR + COİN BAZLI KAR/ZARAR TABLOSU")
     log.info("   GERÇEK EMİR YOK")
     log.info(f"   Başlangıç: {STARTING_BALANCE} | Risk: %{RISK_PERCENT} | Max Poz: {MAX_OPEN_POSITIONS}")
-    log.info(f"   Min Skor: {MIN_SIGNAL_SCORE}/6 | Min Hacim: {MIN_QUOTE_VOLUME/1e6:.0f}M | Top: {TOP_SIGNALS}")
+    log.info(f"   Min Skor: {MIN_SIGNAL_SCORE}/6 | Hacim: {MIN_QUOTE_VOLUME/1e6:.0f}M | ADX ≥ {MIN_ADX}")
     log.info("=" * 70)
 
     init_csv()
@@ -447,21 +576,18 @@ def run_simulation():
         log.error("Uygun sembol bulunamadı.")
         return
 
-    # ========== BAŞLANGIÇ TELEGRAM MESAJI ==========
+    # Başlangıç mesajı
     startup_msg = (
-        f"🚀 Bot v12.1 Başlatıldı\n"
+        f"🚀 <b>Bot v12.4 Başlatıldı</b>\n"
         f"────────────────────\n"
         f"Bakiye: {STARTING_BALANCE} USDT\n"
         f"Risk: %{RISK_PERCENT}\n"
         f"Max Pozisyon: {MAX_OPEN_POSITIONS}\n"
         f"Min Skor: {MIN_SIGNAL_SCORE}/6\n"
-        f"Min Hacim: {MIN_QUOTE_VOLUME/1_000_000:.0f}M USDT\n"
-        f"Seçim: En iyi {TOP_SIGNALS} sinyal"
+        f"Hacim ≥ {MIN_QUOTE_VOLUME/1_000_000:.0f}M | ADX ≥ {MIN_ADX}\n"
+        f"Saatlik detaylı rapor aktif"
     )
-    if send_telegram(startup_msg):
-        log.info("Başlangıç Telegram mesajı gönderildi.")
-    else:
-        log.warning("Başlangıç Telegram mesajı gönderilemedi.")
+    send_telegram(startup_msg)
 
     balance = STARTING_BALANCE
     peak_balance = STARTING_BALANCE
@@ -472,6 +598,7 @@ def run_simulation():
 
     last_symbol_refresh = time.time()
     last_stats_print = 0
+    last_hourly_report = time.time()
     STATS_INTERVAL = 300
 
     while True:
@@ -487,12 +614,8 @@ def run_simulation():
             log.info("-" * 70)
             log.info(f"Döngü | Açık: {len(positions)}/{MAX_OPEN_POSITIONS} | Serbest: {balance - used_margin:.2f}")
 
-            scanned = 0
-            signals_found = 0
-            errors = 0
-            candidates = []
+            scanned = signals_found = errors = 0
 
-            # ---------- 1. Tüm sembolleri tara ----------
             for symbol in all_symbols:
                 try:
                     time.sleep(REQUEST_DELAY)
@@ -523,14 +646,13 @@ def run_simulation():
                         reason = ""
                         exit_price = None
 
-                        # Akıllı Trailing
+                        # Trailing
                         r_distance = abs(entry - pos["initial_sl"])
                         if side == "LONG":
                             current_r = (price - entry) / r_distance if r_distance > 0 else 0
                             if current_r >= BREAKEVEN_R and sl < entry:
                                 pos["sl"] = entry
                                 sl = entry
-                                log.info(f"   #{pos['id']} {symbol} → Breakeven")
                             if atr_val:
                                 new_trail = price - atr_val * TRAIL_ATR_MULTIPLIER
                                 if new_trail > sl:
@@ -541,14 +663,13 @@ def run_simulation():
                             if current_r >= BREAKEVEN_R and sl > entry:
                                 pos["sl"] = entry
                                 sl = entry
-                                log.info(f"   #{pos['id']} {symbol} → Breakeven")
                             if atr_val:
                                 new_trail = price + atr_val * TRAIL_ATR_MULTIPLIER
                                 if new_trail < sl:
                                     pos["sl"] = new_trail
                                     sl = new_trail
 
-                        # Çıkış kontrolü
+                        # Çıkış
                         if side == "LONG":
                             if low <= sl:
                                 result_pct = (sl - entry) / entry * 100
@@ -595,92 +716,87 @@ def run_simulation():
                             closed_trades.append(trade_record)
                             save_trade_to_csv(trade_record)
 
-                            log.info(f">>> KAPANDI #{pos['id']} {symbol} {side} | {reason} | K/Z: {pnl:+.2f} ({result_pct:+.2f}%) | Bakiye: {balance:.2f}")
+                            log.info(f">>> KAPANDI #{pos['id']} {symbol} {side} | {reason} | K/Z: {pnl:+.2f} | Bakiye: {balance:.2f}")
 
                             send_telegram(
-                                f"📉 KAPANDI #{pos['id']}\n{symbol} {side}\n"
+                                f"📉 <b>KAPANDI #{pos['id']}</b>\n"
+                                f"{symbol} {side}\n"
                                 f"Sebep: {reason}\n"
                                 f"Giriş: {entry:.6f} → {exit_price:.6f}\n"
-                                f"K/Z: {pnl:+.2f} USDT ({result_pct:+.2f}%)\n"
+                                f"K/Z: <b>{pnl:+.2f}</b> USDT ({result_pct:+.2f}%)\n"
                                 f"Bakiye: {balance:.2f}"
                             )
                             del positions[symbol]
                         continue
 
-                    # Sinyal adayı topla
+                    # Yeni pozisyon
                     if data["signal"] in ("LONG", "SHORT"):
-                        candidates.append((abs(data["score"]), symbol, data))
+                        if len(positions) >= MAX_OPEN_POSITIONS:
+                            continue
+                        free = balance - used_margin
+                        if free < 10:
+                            continue
+
+                        sl = data["long_sl"] if data["signal"] == "LONG" else data["short_sl"]
+                        if sl is None:
+                            continue
+
+                        size, margin, risk_usdt = calculate_position_size(balance, price, sl, data["signal"])
+                        if margin <= 0 or size <= 0 or free < margin:
+                            continue
+
+                        trade_number += 1
+                        positions[symbol] = {
+                            "id": trade_number,
+                            "symbol": symbol,
+                            "side": data["signal"],
+                            "entry": price,
+                            "sl": sl,
+                            "initial_sl": sl,
+                            "size": size,
+                            "margin": margin,
+                            "risk_usdt": risk_usdt,
+                            "opened_at": now_text(),
+                            "just_opened": True,
+                        }
+                        used_margin += margin
+                        signals_found += 1
+
+                        log.info(
+                            f">>> AÇILDI #{trade_number} {symbol} {data['signal']} | "
+                            f"Skor: {abs(data['score'])}/6 | ADX: {data['adx']:.1f} | "
+                            f"Giriş: {price:.6f} | Risk: {risk_usdt:.2f}"
+                        )
+
+                        send_telegram(
+                            f"🚀 <b>YENİ #{trade_number}</b>\n"
+                            f"{symbol} {data['signal']}\n"
+                            f"Skor: {abs(data['score'])}/6 | ADX: {data['adx']:.1f}\n"
+                            f"Giriş: {price:.6f}\n"
+                            f"SL: {sl:.6f}\n"
+                            f"Risk: {risk_usdt:.2f} USDT\n"
+                            f"{data['reasons']}"
+                        )
 
                 except Exception as e:
                     errors += 1
                     if errors <= 3 or errors % 20 == 0:
                         log.warning(f"{symbol} hata: {e}")
 
-            # ---------- 2. En iyi sinyalleri seç ve aç ----------
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            top_candidates = candidates[:TOP_SIGNALS]
-
-            log.info(f"Aday sinyal: {len(candidates)} | En iyi {len(top_candidates)} seçildi")
-
-            for score, symbol, data in top_candidates:
-                if len(positions) >= MAX_OPEN_POSITIONS:
-                    break
-                if symbol in positions:
-                    continue
-
-                free = balance - used_margin
-                if free < 10:
-                    break
-
-                signal = data["signal"]
-                price = data["price"]
-                sl = data["long_sl"] if signal == "LONG" else data["short_sl"]
-                if sl is None:
-                    continue
-
-                size, margin, risk_usdt = calculate_position_size(balance, price, sl, signal)
-                if margin <= 0 or size <= 0 or free < margin:
-                    continue
-
-                trade_number += 1
-                positions[symbol] = {
-                    "id": trade_number,
-                    "symbol": symbol,
-                    "side": signal,
-                    "entry": price,
-                    "sl": sl,
-                    "initial_sl": sl,
-                    "size": size,
-                    "margin": margin,
-                    "risk_usdt": risk_usdt,
-                    "opened_at": now_text(),
-                    "just_opened": True,
-                }
-                used_margin += margin
-                signals_found += 1
-
-                log.info(
-                    f">>> AÇILDI #{trade_number} {symbol} {signal} | "
-                    f"Skor: {score}/6 | Giriş: {price:.6f} | SL: {sl:.6f} | "
-                    f"Risk: {risk_usdt:.2f} | {data['reasons']}"
-                )
-
-                send_telegram(
-                    f"🚀 YENİ #{trade_number}\n"
-                    f"{symbol} {signal}\n"
-                    f"Skor: {score}/6\n"
-                    f"Giriş: {price:.6f}\n"
-                    f"SL: {sl:.6f}\n"
-                    f"Risk: {risk_usdt:.2f} USDT\n"
-                    f"{data['reasons']}"
-                )
-
             elapsed = time.time() - cycle_start
-            log.info(f"Tarama bitti | Taranan: {scanned} | Yeni açılan: {signals_found} | Hata: {errors} | Süre: {elapsed:.1f}s")
+            log.info(f"Tarama bitti | Taranan: {scanned} | Yeni: {signals_found} | Hata: {errors} | Süre: {elapsed:.1f}s")
 
+            # Konsol istatistik
             if time.time() - last_stats_print > STATS_INTERVAL:
                 print_stats(balance, peak_balance, closed_trades, positions, used_margin)
                 last_stats_print = time.time()
+
+            # ========== SAATLİK TELEGRAM RAPORU ==========
+            if time.time() - last_hourly_report >= HOURLY_REPORT_SECONDS:
+                report = generate_hourly_report(balance, peak_balance, closed_trades, positions, used_margin)
+                if send_telegram(report):
+                    log.info("Saatlik Telegram raporu gönderildi.")
+                last_hourly_report = time.time()
 
             sleep_time = max(20, LOOP_SECONDS - elapsed)
             log.info(f"Sonraki tarama: {sleep_time:.0f} sn")
@@ -689,6 +805,9 @@ def run_simulation():
         except KeyboardInterrupt:
             log.info("Durduruldu.")
             print_stats(balance, peak_balance, closed_trades, positions, used_margin)
+            # Son rapor gönder
+            final_report = generate_hourly_report(balance, peak_balance, closed_trades, positions, used_margin)
+            send_telegram("🛑 Bot durduruldu\n\n" + final_report)
             break
         except Exception as e:
             log.exception(f"GENEL HATA: {e}")
